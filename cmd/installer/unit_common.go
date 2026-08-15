@@ -5,7 +5,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // linuxPlan 一次 Linux 安装的生成物。
@@ -25,8 +24,6 @@ func buildLinuxPlan(cfg *installConfig) (*linuxPlan, error) {
 		name, unitName = "rtctl-agent", "rtctl-agent"
 	case "clientd":
 		name, unitName = "rtctl-client", "rtctl-clientd"
-	case "server":
-		name, unitName = "rtctl-server", "rtctl-server"
 	default:
 		return nil, errors.New("未知组件")
 	}
@@ -42,42 +39,15 @@ func buildLinuxPlan(cfg *installConfig) (*linuxPlan, error) {
 	extra := map[string]string{}
 	switch cfg.component {
 	case "agent":
-		if cfg.listen != "" {
-			execLine = fmt.Sprintf("%s -listen %q", dst, cfg.listen)
-			if cfg.tlsCert != "" {
-				execLine += fmt.Sprintf(" -tls-cert %q -tls-key %q", cfg.tlsCert, cfg.tlsKey)
-			}
-		} else {
-			execLine = fmt.Sprintf("%s -server %q", dst, cfg.serverURL)
+		execLine = fmt.Sprintf("%s -listen %q", dst, cfg.listen)
+		if cfg.tlsCert != "" {
+			execLine += fmt.Sprintf(" -tls-cert %q -tls-key %q", cfg.tlsCert, cfg.tlsKey)
 		}
 		execLine += fmt.Sprintf(" -id %q", cfg.id)
 		unitExtra = fmt.Sprintf("Environment=RTCTL_TOKEN=%s\n", cfg.token)
 	case "clientd":
-		execLine = dst
-		if cfg.serverURL != "" {
-			execLine += fmt.Sprintf(" -server %q -key %q", cfg.serverURL, cfg.clientKey)
-		}
-		execLine += fmt.Sprintf(" -client-id clientd serve -listen %q -devices /etc/rtctl/clientd-devices.json -api-key %q", cfg.httpListen, cfg.apiKey)
-	case "server":
-		var tokens strings.Builder
-		var devs strings.Builder
-		devs.WriteString(`{ "devices": [`)
-		for i, id := range cfg.deviceIDs {
-			tok := genToken()
-			if i > 0 {
-				devs.WriteString(",")
-			}
-			fmt.Fprintf(&devs, ` { "id": %q, "token": %q }`, id, tok)
-			fmt.Fprintf(&tokens, "设备 %s 的 token: %s\n", id, tok)
-		}
-		devs.WriteString(" ] }")
-		extra["/etc/rtctl/devices.json"] = devs.String()
-		extra["/etc/rtctl/tokens.txt"] = tokens.String()
-		execLine = fmt.Sprintf("%s -listen :%s -devices /etc/rtctl/devices.json -client-key %q -audit /var/log/rtctl-audit.log",
-			dst, strings.TrimPrefix(cfg.port, ":"), cfg.clientKey)
-		if cfg.tlsCert != "" {
-			execLine += fmt.Sprintf(" -tls-cert %q -tls-key %q", cfg.tlsCert, cfg.tlsKey)
-		}
+		execLine = fmt.Sprintf("%s -client-id clientd serve -listen %q -devices /etc/rtctl/clientd-devices.json -api-key %q",
+			dst, cfg.httpListen, cfg.apiKey)
 	}
 
 	unit := fmt.Sprintf(`[Unit]

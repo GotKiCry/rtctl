@@ -1,10 +1,10 @@
-// Package agent 实现被控端：连接服务器、接收指令、执行命令。
+// Package agent 实现被控端：直连模式，自带 WS 服务端，
+// client / clientd 直接连接本机并执行指令。
 package agent
 
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,11 +21,10 @@ import (
 	"rtctl/internal/proto"
 )
 
-// Version agent 版本号，随 register 上报。
-const Version = "2.0.0"
+// Version agent 版本号。
+const Version = "3.0.0"
 
 const (
-	execSendQueueSize  = 256
 	maxConcurrentExec  = 32 // 单设备并发 exec 上限
 	maxConcurrentShell = 8  // 单设备并发 shell 上限
 	maxConcurrentPut   = 8  // 单设备并发上传上限
@@ -34,21 +33,14 @@ const (
 	maxFileSize        = 256 << 20 // 单文件上限 256MB
 )
 
-var (
-	errSendQueueFull = errors.New("发送队列已满")
-	// errAuthRejected 注册被拒绝：id/token 无效，重连无意义，立即退出。
-	errAuthRejected = errors.New("注册被拒绝（id 或 token 无效），停止重连")
-)
+var errSendQueueFull = errors.New("发送队列已满")
 
 // Agent 被控端。
 type Agent struct {
-	ServerURL string
-	ID        string
-	Token     string
+	ID    string
+	Token string
 
 	mu       sync.Mutex
-	ws       *websocket.Conn               // 由 mu 保护；每轮连接替换
-	send     chan []byte                   // 由 mu 保护；每轮连接替换
 	execs    map[string]context.CancelFunc // exec 消息 ID -> 取消函数
 	shells   map[string]*shellHandle       // session_id -> 终端会话
 	putFiles map[string]*filePutState      // 传输 ID -> 上传状态
@@ -70,117 +62,20 @@ type filePutState struct {
 }
 
 // New 创建 Agent。
-func New(serverURL, id, token string) *Agent {
+func New(id, token string) *Agent {
 	return &Agent{
-		ServerURL: serverURL,
-		ID:        id,
-		Token:     token,
-		execs:     make(map[string]context.CancelFunc),
-		shells:    make(map[string]*shellHandle),
-		putFiles:  make(map[string]*filePutState),
-		execSem:   make(chan struct{}, maxConcurrentExec),
-		shellSem:  make(chan struct{}, maxConcurrentShell),
-		getSem:    make(chan struct{}, maxConcurrentGet),
+		ID:       id,
+		Token:    token,
+		execs:    make(map[string]context.CancelFunc),
+		shells:   make(map[string]*shellHandle),
+		putFiles: make(map[string]*filePutState),
+		execSem:  make(chan struct{}, maxConcurrentExec),
+		shellSem: make(chan struct{}, maxConcurrentShell),
+		getSem:   make(chan struct{}, maxConcurrentGet),
 	}
 }
 
-// Run 主循环：连接 -> 注册 -> 服务，断线自动重连（指数退避，上限 30s）。
-// 注册被拒绝（token 错误）时立即返回错误退出，不无限重连。
-func (a *Agent) Run(ctx context.Context) error {
-	delay := time.Second
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-		err := a.connectAndServe(ctx)
-		a.cleanup()
-		if err == nil {
-			return nil
-		}
-		if errors.Is(err, errAuthRejected) {
-			return err // 不重连
-		}
-		log.Printf("[agent] 连接断开: %v，%s 后重连", err, delay)
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(delay):
-		}
-		if delay < 30*time.Second {
-			delay *= 2
-			if delay > 30*time.Second {
-				delay = 30 * time.Second
-			}
-		}
-	}
-}
-
-// connectAndServe 连接服务器并服务消息，直到连接断开。
-// ws 与 send 通道作为本轮连接的局部资源，旧连接的 goroutine 不会触碰新连接。
-func (a *Agent) connectAndServe(ctx context.Context) error {
-	conn, _, err := websocket.DefaultDialer.Dial(a.ServerURL, nil)
-	if err != nil {
-		return err
-	}
-	send := make(chan []byte, execSendQueueSize)
-	a.mu.Lock()
-	a.ws, a.send = conn, send
-	a.mu.Unlock()
-	go writePump(conn, send)
-
-	// 注册（携带设备元数据，供 server list 展示）
-	hostname, _ := os.Hostname()
-	reg, _ := proto.WithPayload(proto.Msg{Type: proto.TypeRegister, DeviceID: a.ID},
-		proto.RegisterPayload{ID: a.ID, Token: a.Token,
-			OS: runtime.GOOS, Arch: runtime.GOARCH, Hostname: hostname, Version: Version})
-	if err := conn.WriteJSON(reg); err != nil {
-		conn.Close()
-		return err
-	}
-
-	conn.SetReadLimit(4 << 20)
-	conn.SetReadDeadline(time.Now().Add(90 * time.Second))
-	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
-		return nil
-	})
-	log.Printf("[agent] 已连接 %s，等待指令（设备 %s）", a.ServerURL, a.ID)
-
-	registered := false
-	for {
-		_, data, err := conn.ReadMessage()
-		if err != nil {
-			return err
-		}
-		var m proto.Msg
-		if err := json.Unmarshal(data, &m); err != nil {
-			log.Printf("[agent] 消息解析失败: %v", err)
-			continue
-		}
-		if !registered {
-			// 注册确认前只接受 register_ack / error
-			switch m.Type {
-			case proto.TypeRegisterAck:
-				var p proto.RegisterAckPayload
-				_ = m.PayloadOf(&p)
-				if !p.OK {
-					return errAuthRejected
-				}
-				registered = true
-			case proto.TypeError:
-				return errAuthRejected
-			default:
-				continue // 忽略注册前指令
-			}
-			continue
-		}
-		a.handleMsg(ctx, m, a)
-	}
-}
-
-// writePump 每轮连接独立的写循环（参数局部化，避免跨连接串写）。
+// writePump 每条直连连接的写循环（参数局部化，避免跨连接串写）。
 func writePump(ws *websocket.Conn, send chan []byte) {
 	ticker := time.NewTicker(25 * time.Second)
 	defer ticker.Stop()
@@ -202,106 +97,11 @@ func writePump(ws *websocket.Conn, send chan []byte) {
 	}
 }
 
-// sendMsg 把消息放入当前连接的发送队列（非阻塞，队列满返回 errSendQueueFull）。
-func (a *Agent) sendMsg(m proto.Msg) error {
-	b, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	a.mu.Lock()
-	send := a.send
-	a.mu.Unlock()
-	if send == nil {
-		return errSendQueueFull
-	}
-	select {
-	case send <- b:
-		return nil
-	default:
-		return errSendQueueFull
-	}
-}
-
-// sendMsgBlocking 阻塞发送关键帧（done / ack），队列满时最多等待 timeout。
-func (a *Agent) sendMsgBlocking(m proto.Msg, timeout time.Duration) error {
-	b, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	a.mu.Lock()
-	send := a.send
-	a.mu.Unlock()
-	if send == nil {
-		return errors.New("连接已关闭")
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case send <- b:
-		return nil
-	case <-timer.C:
-		return errors.New("发送超时")
-	}
-}
-
-// cleanup 连接断开后清理所有执行与终端。
-func (a *Agent) cleanup() {
-	a.mu.Lock()
-	ws := a.ws
-	a.ws, a.send = nil, nil
-	for _, cancel := range a.execs {
-		cancel()
-	}
-	a.execs = make(map[string]context.CancelFunc)
-	shells := make([]*shellHandle, 0, len(a.shells))
-	for _, sh := range a.shells {
-		shells = append(shells, sh)
-	}
-	a.shells = make(map[string]*shellHandle)
-	puts := make([]*filePutState, 0, len(a.putFiles))
-	for _, st := range a.putFiles {
-		puts = append(puts, st)
-	}
-	a.putFiles = make(map[string]*filePutState)
-	a.mu.Unlock()
-	for _, sh := range shells {
-		sh.sess.Close()
-	}
-	for _, st := range puts {
-		if st.file != nil {
-			st.file.Close()
-		}
-		os.Remove(st.tmpPath)
-	}
-	if ws != nil {
-		ws.Close()
-	}
-}
-
-// sendSink 响应目标抽象：中继模式下为 agent 全局发送队列，
-// 直连（standalone）模式下为对应客户端的连接队列。
+// sendSink 响应目标抽象：每条直连客户端连接的响应队列。
 type sendSink interface {
 	Send(proto.Msg) error
 	SendBlocking(proto.Msg, time.Duration) error
 	CloseConn() // 关键帧送达失败时断开对应连接
-}
-
-// Send 实现 sendSink（中继模式：写入全局队列）。
-func (a *Agent) Send(m proto.Msg) error { return a.sendMsg(m) }
-
-// SendBlocking 实现 sendSink（中继模式）。
-func (a *Agent) SendBlocking(m proto.Msg, timeout time.Duration) error {
-	return a.sendMsgBlocking(m, timeout)
-}
-
-// CloseConn 实现 sendSink（中继模式：断开与服务器的连接）。
-func (a *Agent) CloseConn() {
-	a.mu.Lock()
-	ws := a.ws
-	a.mu.Unlock()
-	if ws != nil {
-		ws.Close()
-	}
 }
 
 // ---- 消息分发 ----
@@ -326,8 +126,6 @@ func (a *Agent) handleMsg(ctx context.Context, m proto.Msg, sink sendSink) {
 		go a.handleFileGet(m, sink)
 	case proto.TypeFileAbort:
 		a.handleFileAbort(m)
-	case proto.TypeRegisterAck:
-		// 已注册后忽略重复 ack
 	default:
 		log.Printf("[agent] 未知消息类型: %s", m.Type)
 	}

@@ -1,4 +1,4 @@
-// rtctl-client 控制端 CLI：连接服务器向目标设备发指令。
+// rtctl-client 控制端 CLI：直连目标设备的 agent 发指令。
 //
 // 用法:
 //
@@ -8,8 +8,7 @@
 //
 // 全局参数（必须放在子命令之前）:
 //
-//	-server    服务器地址（默认 ws://127.0.0.1:8080/ws?role=client）
-//	-key       客户端密钥（与 server 的 -client-key 对应）
+//	-server    设备地址（agent 直连地址，默认 ws://127.0.0.1:8443/ws）
 //	-client-id 操作者/Agent 标识（审计归因）
 //	-json      结构化输出（list / exec 生效）
 package main
@@ -36,7 +35,6 @@ import (
 
 var (
 	serverURL string
-	clientKey string
 	clientID  string
 	jsonMode  bool
 )
@@ -53,8 +51,7 @@ type execResult struct {
 
 func main() {
 	fs := flag.NewFlagSet("rtctl-client", flag.ExitOnError)
-	fs.StringVar(&serverURL, "server", "ws://127.0.0.1:8080/ws?role=client", "服务器地址")
-	fs.StringVar(&clientKey, "key", "", "客户端密钥")
+	fs.StringVar(&serverURL, "server", "ws://127.0.0.1:8443/ws", "设备地址（agent 直连地址）")
 	fs.StringVar(&clientID, "client-id", "", "操作者/Agent 标识（审计归因）")
 	fs.BoolVar(&jsonMode, "json", false, "结构化输出（list / exec）")
 	fs.Parse(os.Args[1:])
@@ -93,7 +90,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, "rtctl-client - 远程终端控制端\n\n用法:\n  rtctl-client [全局参数] list\n  rtctl-client [全局参数] exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-c 命令 | 命令...]\n  rtctl-client [全局参数] shell -token <设备token>\n  rtctl-client [全局参数] file-put -token <设备token> [-mode 0644] <本地文件> <远端路径>\n  rtctl-client [全局参数] file-get -token <设备token> <远端路径> <本地文件>\n  rtctl-client [全局参数] serve -listen 127.0.0.1:18080 -devices devices.json [-api-key K]\n\n全局参数:\n  -server    服务器地址 (默认 ws://127.0.0.1:8080/ws?role=client)\n  -key       客户端密钥（与 server 的 -client-key 对应）\n  -client-id 操作者/Agent 标识（审计归因）\n  -json      结构化输出（list / exec 生效）\n")
+	fmt.Fprint(os.Stderr, "rtctl-client - 远程终端控制端\n\n用法:\n  rtctl-client [全局参数] list\n  rtctl-client [全局参数] exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-c 命令 | 命令...]\n  rtctl-client [全局参数] shell -token <设备token>\n  rtctl-client [全局参数] file-put -token <设备token> [-mode 0644] <本地文件> <远端路径>\n  rtctl-client [全局参数] file-get -token <设备token> <远端路径> <本地文件>\n  rtctl-client [全局参数] serve -listen 127.0.0.1:18080 -devices devices.json [-api-key K]\n\n全局参数:\n  -server    设备地址（agent 直连地址，默认 ws://127.0.0.1:8443/ws）\n  -client-id 操作者/Agent 标识（审计归因）\n  -json      结构化输出（list / exec 生效）\n")
 }
 
 func printJSONError(err error) {
@@ -107,7 +104,7 @@ func connect() (*websocket.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	m, _ := proto.WithPayload(proto.Msg{Type: proto.TypeAuth}, proto.AuthPayload{Key: clientKey, ID: clientID})
+	m, _ := proto.WithPayload(proto.Msg{Type: proto.TypeAuth}, proto.AuthPayload{ID: clientID})
 	if err := conn.WriteJSON(m); err != nil {
 		conn.Close()
 		return nil, err

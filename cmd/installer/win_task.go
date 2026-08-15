@@ -65,51 +65,23 @@ type winPlan struct {
 	exeName  string            // 安装目录下的可执行文件名
 	exePath  string            // 完整路径
 	args     string            // 任务参数
-	extra    map[string]string // 额外文件：路径 -> 内容（server: devices.json/tokens.txt）
+	extra    map[string]string // 额外文件：路径 -> 内容
 }
 
-// buildWinPlan 生成 Windows 安装计划（含任务参数与额外配置文件内容）。
+// buildWinPlan 生成 Windows 安装计划（含任务参数）。
 func buildWinPlan(cfg *installConfig, installDir string) (*winPlan, error) {
 	plan := &winPlan{extra: map[string]string{}}
 	switch cfg.component {
 	case "agent":
 		plan.exeName, plan.taskName = "rtctl-agent.exe", "rtctl-agent"
-		if cfg.listen != "" {
-			plan.args = fmt.Sprintf("-listen %q -id %q", cfg.listen, cfg.id)
-			if cfg.tlsCert != "" {
-				plan.args += fmt.Sprintf(" -tls-cert %q -tls-key %q", cfg.tlsCert, cfg.tlsKey)
-			}
-		} else {
-			plan.args = fmt.Sprintf("-server %q -id %q", cfg.serverURL, cfg.id)
-		}
-	case "clientd":
-		plan.exeName, plan.taskName = "rtctl-client.exe", "rtctl-clientd"
-		if cfg.serverURL != "" {
-			plan.args = fmt.Sprintf("-server %q -key %q", cfg.serverURL, cfg.clientKey)
-		}
-		devicesAbs, _ := filepath.Abs(cfg.devices)
-		plan.args += fmt.Sprintf(" -client-id clientd serve -listen %q -devices %q -api-key %q", cfg.httpListen, devicesAbs, cfg.apiKey)
-	case "server":
-		plan.exeName, plan.taskName = "rtctl-server.exe", "rtctl-server"
-		var tokens, devs bytes.Buffer
-		devs.WriteString(`{ "devices": [`)
-		for i, id := range cfg.deviceIDs {
-			tok := genToken()
-			if i > 0 {
-				devs.WriteString(",")
-			}
-			fmt.Fprintf(&devs, ` { "id": %q, "token": %q }`, id, tok)
-			fmt.Fprintf(&tokens, "设备 %s 的 token: %s\r\n", id, tok)
-		}
-		devs.WriteString(" ] }")
-		plan.extra[filepath.Join(installDir, "devices.json")] = devs.String()
-		plan.extra[filepath.Join(installDir, "tokens.txt")] = tokens.String()
-		plan.args = fmt.Sprintf("-listen :%s -devices %q -client-key %q -audit %q",
-			trimPort(cfg.port), filepath.Join(installDir, "devices.json"), cfg.clientKey,
-			filepath.Join(installDir, "audit.log"))
+		plan.args = fmt.Sprintf("-listen %q -id %q", cfg.listen, cfg.id)
 		if cfg.tlsCert != "" {
 			plan.args += fmt.Sprintf(" -tls-cert %q -tls-key %q", cfg.tlsCert, cfg.tlsKey)
 		}
+	case "clientd":
+		plan.exeName, plan.taskName = "rtctl-client.exe", "rtctl-clientd"
+		devicesAbs, _ := filepath.Abs(cfg.devices)
+		plan.args = fmt.Sprintf("-client-id clientd serve -listen %q -devices %q -api-key %q", cfg.httpListen, devicesAbs, cfg.apiKey)
 	default:
 		return nil, fmt.Errorf("未知组件: %s", cfg.component)
 	}
@@ -117,7 +89,7 @@ func buildWinPlan(cfg *installConfig, installDir string) (*winPlan, error) {
 	return plan, nil
 }
 
-// buildTaskXML 生成计划任务 XML（UTF-16LE），token 经任务环境变量注入。
+// buildTaskXML 生成计划任务 XML（UTF-16LE），agent 的 token 经任务环境变量注入。
 func buildTaskXML(cfg *installConfig, exePath, args string) ([]byte, error) {
 	t := taskXML{Version: "1.2", Xmlns: "http://schemas.microsoft.com/windows/2004/02/mit/task"}
 	t.RegistrationInfo.Description = "rtctl " + cfg.component
@@ -154,11 +126,4 @@ func buildTaskXML(cfg *installConfig, exePath, args string) ([]byte, error) {
 		}
 	}
 	return buf.Bytes(), nil
-}
-
-func trimPort(port string) string {
-	for len(port) > 0 && port[0] == ':' {
-		port = port[1:]
-	}
-	return port
 }

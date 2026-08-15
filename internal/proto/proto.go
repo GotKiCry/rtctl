@@ -5,12 +5,10 @@ import "encoding/json"
 
 // 消息类型常量。
 const (
-	TypeRegister     = "register"       // agent -> server 设备注册
-	TypeRegisterAck  = "register_ack"   // server -> agent 注册结果
-	TypeAuth         = "auth"           // client -> server 客户端认证
-	TypeAuthAck      = "auth_ack"       // server -> client 认证结果
-	TypeList         = "list"           // client -> server 查询在线设备
-	TypeListAck      = "list_ack"       // server -> client 设备列表
+	TypeAuth         = "auth"           // client -> agent 客户端认证（可选字段）
+	TypeAuthAck      = "auth_ack"       // agent -> client 认证结果
+	TypeList         = "list"           // client -> agent 查询设备信息
+	TypeListAck      = "list_ack"       // agent -> client 设备列表
 	TypeExec         = "exec"           // client -> agent 一次性执行命令
 	TypeExecOutput   = "exec_output"    // agent -> client 执行输出分片
 	TypeExecKill     = "exec_kill"      // client -> agent 取消执行
@@ -24,16 +22,15 @@ const (
 	TypeFilePutAck   = "file_put_ack"   // agent -> client 上传完成回执
 	TypeFileGet      = "file_get"       // client -> agent 请求下载
 	TypeFileGetChunk = "file_get_chunk" // agent -> client 下载分片（最后一个分片 done=true）
-	TypeFileAbort    = "file_abort"     // client/server -> agent 取消传输
+	TypeFileAbort    = "file_abort"     // client -> agent 取消传输
 	TypeError        = "error"          // 通用错误
 )
 
 // Msg 是所有消息的统一外壳。
 type Msg struct {
 	Type      string          `json:"type"`
-	ID        string          `json:"id,omitempty"`        // 消息唯一ID（exec 关联用）
-	DeviceID  string          `json:"device_id,omitempty"` // 设备ID（register 用）
-	Token     string          `json:"token,omitempty"`     // 设备 token（定位目标设备）
+	ID        string          `json:"id,omitempty"`    // 消息唯一ID（exec/文件传输关联用）
+	Token     string          `json:"token,omitempty"` // 设备 token（发起类指令校验用）
 	SessionID string          `json:"session_id,omitempty"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
 }
@@ -58,26 +55,9 @@ func WithPayload(m Msg, v any) (Msg, error) {
 
 // ---- 各消息 payload ----
 
-// RegisterPayload 设备注册。
-type RegisterPayload struct {
-	ID       string `json:"id"`
-	Token    string `json:"token"`
-	OS       string `json:"os,omitempty"`       // runtime.GOOS
-	Arch     string `json:"arch,omitempty"`     // runtime.GOARCH
-	Hostname string `json:"hostname,omitempty"` // 设备主机名
-	Version  string `json:"version,omitempty"`  // agent 版本
-}
-
-// RegisterAckPayload 注册结果。
-type RegisterAckPayload struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
-}
-
-// AuthPayload 客户端认证。
+// AuthPayload 客户端认证（可选字段，审计归因用）。
 type AuthPayload struct {
-	Key string `json:"key"`
-	ID  string `json:"id,omitempty"` // 操作者/Agent 标识（审计归因用）
+	ID string `json:"id,omitempty"` // 操作者/Agent 标识
 }
 
 // AuthAckPayload 认证结果。
@@ -184,18 +164,16 @@ type FileGetChunkPayload struct {
 
 // 机器可读错误码：Agent/自动化客户端可据此决策（重试 / 报错 / 改配置）。
 const (
-	ErrorCodeBadToken     = "bad_token"       // token 不存在（配置错误，重试无用）
-	ErrorCodeOffline      = "device_offline"  // 设备离线（可等待重试）
+	ErrorCodeBadToken     = "bad_token"       // token 无效（配置错误，重试无用）
 	ErrorCodeAuthRequired = "auth_required"   // 未认证，先发 auth
 	ErrorCodeBadPayload   = "bad_payload"     // 消息 payload 无效
 	ErrorCodeTimeout      = "timeout"         // 执行超时
 	ErrorCodeKilled       = "killed"          // 执行被取消/中断
-	ErrorCodeAgentLost    = "agent_lost"      // 执行中 agent 掉线
 	ErrorCodeStartFailed  = "start_failed"    // 进程启动失败
 	ErrorCodeOverload     = "overload"        // 并发超限
 	ErrorCodeConflict     = "conflict"        // ID 冲突
 	ErrorCodeNotFound     = "not_found"       // 文件不存在
 	ErrorCodeBadDevice    = "bad_device"      // 未知设备 ID（clientd 配置中不存在）
-	ErrorCodeConnLost     = "connection_lost" // 服务与中继的连接断开
+	ErrorCodeConnLost     = "connection_lost" // 与设备的连接断开
 	ErrorCodeInternal     = "internal"        // 内部错误
 )

@@ -66,14 +66,6 @@ func installService(cfg *installConfig, binPath string) error {
 			return fmt.Errorf("授权设备清单失败: %w", err)
 		}
 	}
-	if cfg.component == "server" {
-		os.MkdirAll("/etc/rtctl", 0o755)
-		// 预创建审计日志并授权服务账户写入
-		if f, err := os.OpenFile("/var/log/rtctl-audit.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
-			f.Close()
-			chownTo("/var/log/rtctl-audit.log")
-		}
-	}
 	for path, content := range plan.extraFiles {
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			return fmt.Errorf("写入 %s 失败: %w", path, err)

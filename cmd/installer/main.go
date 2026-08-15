@@ -38,15 +38,11 @@ const ghBaseDefault = "https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin
 var (
 	reader = bufio.NewReader(os.Stdin)
 
-	flComponent  = flag.String("component", "", "组件: agent / clientd / server / client")
+	flComponent  = flag.String("component", "", "组件: agent / clientd / client")
 	flID         = flag.String("id", "", "设备 ID")
 	flToken      = flag.String("token", "", "设备 token")
 	flGenToken   = flag.Bool("gen-token", false, "自动生成设备 token")
-	flListen     = flag.String("listen", "", "agent 直连监听地址（如 :8443）")
-	flServerURL  = flag.String("server-url", "", "中继服务器地址（agent 拨出 / clientd 中继）")
-	flPort       = flag.String("port", "8443", "server 中继监听端口")
-	flDeviceIDs  = flag.String("device-ids", "", "server 设备 ID 列表（逗号分隔）")
-	flClientKey  = flag.String("client-key", "", "中继客户端密钥")
+	flListen     = flag.String("listen", "", "agent 监听地址（如 :8443）")
 	flDevices    = flag.String("devices", "devices.json", "clientd 设备清单文件")
 	flAPIKey     = flag.String("api-key", "", "clientd API 密钥")
 	flGenAPIKey  = flag.Bool("gen-api-key", false, "自动生成 clientd API 密钥")
@@ -78,18 +74,13 @@ type installConfig struct {
 	component  string
 	id         string
 	token      string
-	listen     string // agent 直连
-	serverURL  string // agent 拨出 / clientd 中继
-	port       string
-	deviceIDs  []string
-	clientKey  string
+	listen     string // agent 监听地址
 	devices    string
 	apiKey     string
 	httpListen string
 	tlsCert    string
 	tlsKey     string
 	user       string
-	genToken   bool
 }
 
 func ask(prompt, def string) string {
@@ -164,14 +155,13 @@ func wizard() (*installConfig, error) {
 
 	if cfg.component == "" {
 		if !interactive() {
-			return nil, errors.New("非交互模式需要 --component（agent / clientd / server / client）")
+			return nil, errors.New("非交互模式需要 --component（agent / clientd / client）")
 		}
-		cfg.component = []string{"agent", "clientd", "server", "client"}[askChoice(
+		cfg.component = []string{"agent", "clientd", "client"}[askChoice(
 			"=== rtctl 一键安装向导 ===\n选择要安装的组件:",
 			[]string{
 				"agent 被控端（装在目标服务器上，被控制）",
 				"clientd 控制服务（装在操作机上，给 AI Agent 调用）",
-				"server 中继（目标机在 NAT 后无法直连时才需要）",
 				"client 客户端 CLI（仅下载二进制）",
 			}, 0)]
 	}
@@ -184,20 +174,15 @@ func wizard() (*installConfig, error) {
 			}
 			cfg.id = ask("设备 ID（唯一名称，如 jp-tokyo-01）", "")
 		}
-		if *flListen != "" || *flServerURL != "" {
-			cfg.listen, cfg.serverURL = *flListen, *flServerURL
-		} else if interactive() {
-			mode := askChoice("接入方式:",
-				[]string{"直连（推荐：目标机可被访问，无需中继）", "中继（NAT 后无法直连）"}, 0)
-			if mode == 0 {
+		cfg.listen = *flListen
+		if cfg.listen == "" {
+			if interactive() {
 				cfg.listen = ask("监听端口", ":8443")
 			} else {
-				cfg.serverURL = ask("中继服务器地址", "wss://中继IP:8443/ws?role=agent")
+				return nil, errors.New("非交互模式需要 --listen")
 			}
-		} else {
-			return nil, errors.New("非交互模式需要 --listen（直连）或 --server-url（中继）")
 		}
-		if cfg.listen != "" && !strings.Contains(cfg.listen, ":") {
+		if !strings.Contains(cfg.listen, ":") {
 			cfg.listen = ":" + cfg.listen
 		}
 		cfg.token = *flToken
@@ -218,7 +203,7 @@ func wizard() (*installConfig, error) {
 			}
 		}
 		cfg.tlsCert, cfg.tlsKey = *flTLSCert, *flTLSKey
-		if cfg.listen != "" && cfg.tlsCert == "" && interactive() && askYesNo("启用 WSS（需要证书路径）?", false) {
+		if cfg.tlsCert == "" && interactive() && askYesNo("启用 WSS（需要证书路径）?", false) {
 			cfg.tlsCert = ask("证书路径", "")
 			cfg.tlsKey = ask("私钥路径", "")
 		}
@@ -230,15 +215,10 @@ func wizard() (*installConfig, error) {
 		}
 		cfg.devices = *flDevices
 		if interactive() {
-			cfg.devices = ask("设备清单文件路径（先准备好，条目带 url 直连、不带 url 经中继）", cfg.devices)
+			cfg.devices = ask("设备清单文件路径（先准备好，每条设备带 url 直连地址）", cfg.devices)
 		}
 		if _, err := os.Stat(cfg.devices); err != nil {
 			return nil, fmt.Errorf("设备清单不存在: %s", cfg.devices)
-		}
-		cfg.serverURL = *flServerURL
-		if cfg.serverURL == "" && interactive() && askYesNo("清单里有不带 url 的设备（需经中继）?", false) {
-			cfg.serverURL = ask("中继服务器地址", "wss://中继IP:8443/ws?role=client")
-			cfg.clientKey = ask("中继客户端密钥", "")
 		}
 		cfg.apiKey = *flAPIKey
 		if cfg.apiKey == "" {
@@ -255,56 +235,10 @@ func wizard() (*installConfig, error) {
 			}
 		}
 		cfg.user = *flUser
-	case "server":
-		cfg.port = *flPort
-		if !strings.Contains(cfg.port, ":") {
-			cfg.port = ":" + cfg.port
-		}
-		if *flDeviceIDs != "" {
-			for _, id := range strings.Split(*flDeviceIDs, ",") {
-				if id = strings.TrimSpace(id); id != "" {
-					cfg.deviceIDs = append(cfg.deviceIDs, id)
-				}
-			}
-		}
-		if len(cfg.deviceIDs) == 0 {
-			if !interactive() {
-				return nil, errors.New("非交互模式需要 --device-ids（逗号分隔）")
-			}
-			ids := ask("设备 ID 列表（逗号分隔，如 jp-tokyo-01,web-01）", "")
-			for _, id := range strings.Split(ids, ",") {
-				if id = strings.TrimSpace(id); id != "" {
-					cfg.deviceIDs = append(cfg.deviceIDs, id)
-				}
-			}
-		}
-		if len(cfg.deviceIDs) == 0 {
-			return nil, errors.New("至少需要一个设备 ID")
-		}
-		cfg.clientKey = *flClientKey
-		if cfg.clientKey == "" {
-			if *flGenToken || !interactive() {
-				cfg.clientKey = genToken()
-			} else {
-				choice := askChoice("客户端密钥（client/clientd 连接中继用）:",
-					[]string{"自动生成（推荐）", "手动输入"}, 0)
-				if choice == 0 {
-					cfg.clientKey = genToken()
-				} else {
-					cfg.clientKey = ask("请输入客户端密钥", "")
-				}
-			}
-		}
-		cfg.tlsCert, cfg.tlsKey = *flTLSCert, *flTLSKey
-		if cfg.tlsCert == "" && interactive() && askYesNo("启用 WSS（需要证书路径）?", false) {
-			cfg.tlsCert = ask("证书路径", "")
-			cfg.tlsKey = ask("私钥路径", "")
-		}
-		cfg.user = *flUser
 	case "client":
 		// 仅下载，无参数
 	default:
-		return nil, fmt.Errorf("未知组件: %s（agent / clientd / server / client）", cfg.component)
+		return nil, fmt.Errorf("未知组件: %s（agent / clientd / client）", cfg.component)
 	}
 	return cfg, nil
 }
@@ -319,7 +253,7 @@ func arch() string {
 }
 
 func binaryName(component string) string {
-	base := map[string]string{"agent": "agent", "server": "server", "client": "client", "clientd": "client"}
+	base := map[string]string{"agent": "agent", "client": "client", "clientd": "client"}
 	if runtime.GOOS == "windows" {
 		return base[component] + ".exe"
 	}
@@ -466,21 +400,16 @@ func printSummary(cfg *installConfig) {
 	fmt.Println("================ 安装完成 ================")
 	switch cfg.component {
 	case "agent":
-		if cfg.listen != "" {
-			fmt.Printf("✔ agent 直连模式已安装并启动：监听 %s（开机自启，无需中继）\n", cfg.listen)
-			fmt.Printf("  设备 token: %s（请妥善保存，控制端需要它）\n", cfg.token)
-			fmt.Println()
-			fmt.Println("  验证（任意装有 client 的机器）:")
-			fmt.Printf("    client -server ws://<本机IP>%s/ws exec -token %s 'uptime'\n", cfg.listen, cfg.token)
-			fmt.Println()
-			fmt.Println("  clientd 设备清单片段（复制到操作机 devices.json 即可直连）:")
-			fmt.Printf("    { \"devices\": [ { \"id\": %q, \"url\": \"ws://<本机IP>%s/ws\", \"token\": %q } ] }\n",
-				cfg.id, cfg.listen, cfg.token)
-			fmt.Println("  （生产环境建议重装时启用 WSS）")
-		} else {
-			fmt.Printf("✔ agent 中继模式已安装并启动（开机自启，自动重连）\n")
-			fmt.Printf("  日志: journalctl -u rtctl-agent -f\n")
-		}
+		fmt.Printf("✔ agent 已安装并启动：监听 %s（开机自启）\n", cfg.listen)
+		fmt.Printf("  设备 token: %s（请妥善保存，控制端需要它）\n", cfg.token)
+		fmt.Println()
+		fmt.Println("  验证（任意装有 client 的机器）:")
+		fmt.Printf("    client -server ws://<本机IP>%s/ws exec -token %s 'uptime'\n", cfg.listen, cfg.token)
+		fmt.Println()
+		fmt.Println("  clientd 设备清单片段（复制到操作机 devices.json 即可直连）:")
+		fmt.Printf("    { \"devices\": [ { \"id\": %q, \"url\": \"ws://<本机IP>%s/ws\", \"token\": %q } ] }\n",
+			cfg.id, cfg.listen, cfg.token)
+		fmt.Println("  （生产环境建议启用 WSS）")
 	case "clientd":
 		fmt.Printf("✔ clientd 已安装并启动: http://%s（开机自启）\n", cfg.httpListen)
 		fmt.Printf("  API 密钥: %s（Authorization: Bearer %s）\n", cfg.apiKey, cfg.apiKey)
@@ -489,16 +418,6 @@ func printSummary(cfg *installConfig) {
 		fmt.Printf("    curl -H 'Authorization: Bearer %s' -d '{\"device_id\":\"<设备ID>\",\"cmd\":\"uptime\",\"timeout_ms\":10000}' http://%s/api/v1/exec\n",
 			cfg.apiKey, cfg.httpListen)
 		fmt.Printf("    curl -H 'Authorization: Bearer %s' http://%s/api/v1/devices\n", cfg.apiKey, cfg.httpListen)
-	case "server":
-		fmt.Printf("✔ 中继已安装并启动：监听 %s（开机自启）\n", cfg.port)
-		fmt.Printf("  客户端密钥: %s\n", cfg.clientKey)
-		fmt.Println("  设备 token 已保存到 /etc/rtctl/tokens.txt（或 C:\\Program Files\\rtctl\\tokens.txt），每台 agent 一个:")
-		for _, id := range cfg.deviceIDs {
-			fmt.Printf("    设备 %s: 见 tokens.txt 对应行\n", id)
-		}
-		fmt.Println()
-		fmt.Println("  被控机安装（直连不需要中继；NAT 场景用拨出模式）:")
-		fmt.Printf("    ./rtctl-wizard --component agent --server-url wss://<中继IP>%s/ws?role=agent --id <设备ID> --token <对应token>\n", cfg.port)
 	}
 	fmt.Println("==========================================")
 }
