@@ -373,6 +373,9 @@ func cmdShell(args []string) error {
 			}
 			if rerr != nil {
 				if rerr == io.EOF {
+					// stdin 关闭（管道输入场景）：给远端 shell 一点时间消化
+					// 已缓冲的输入再关闭会话，否则命令会被 PTY 关闭吞掉
+					time.Sleep(500 * time.Millisecond)
 					conn.WriteJSON(proto.Msg{Type: proto.TypeShellClose, SessionID: sessionID})
 				}
 				return

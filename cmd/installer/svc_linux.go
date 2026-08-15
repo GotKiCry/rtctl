@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
+	"strconv"
 	"strings"
 )
 
@@ -34,7 +36,8 @@ func installService(cfg *installConfig, binPath string) error {
 		}
 	}
 
-	// 安装二进制
+	// 安装二进制（先停旧服务，避免覆盖运行中的可执行文件报 text file busy）
+	exec.Command("systemctl", "stop", plan.unitName).Run()
 	dst := "/usr/local/bin/" + plan.binaryName
 	if err := copyFile(binPath, dst); err != nil {
 		return fmt.Errorf("安装二进制失败: %w", err)
@@ -43,9 +46,15 @@ func installService(cfg *installConfig, binPath string) error {
 		os.Remove(binPath)
 	}
 
-	// 配置文件（0600）
-	if cfg.component == "server" {
-		os.MkdirAll("/etc/rtctl", 0o755)
+	// 配置文件（0600 且归属服务运行账户——否则服务读不到会崩溃循环）
+	chownTo := func(path string) error {
+		u, err := user.Lookup(plan.user)
+		if err != nil {
+			return fmt.Errorf("查找用户 %s 失败: %w", plan.user, err)
+		}
+		uid, _ := strconv.Atoi(u.Uid)
+		gid, _ := strconv.Atoi(u.Gid)
+		return os.Chown(path, uid, gid)
 	}
 	if cfg.component == "clientd" {
 		os.MkdirAll("/etc/rtctl", 0o755)
@@ -53,10 +62,24 @@ func installService(cfg *installConfig, binPath string) error {
 			return fmt.Errorf("拷贝设备清单失败: %w", err)
 		}
 		os.Chmod("/etc/rtctl/clientd-devices.json", 0o600)
+		if err := chownTo("/etc/rtctl/clientd-devices.json"); err != nil {
+			return fmt.Errorf("授权设备清单失败: %w", err)
+		}
+	}
+	if cfg.component == "server" {
+		os.MkdirAll("/etc/rtctl", 0o755)
+		// 预创建审计日志并授权服务账户写入
+		if f, err := os.OpenFile("/var/log/rtctl-audit.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+			f.Close()
+			chownTo("/var/log/rtctl-audit.log")
+		}
 	}
 	for path, content := range plan.extraFiles {
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			return fmt.Errorf("写入 %s 失败: %w", path, err)
+		}
+		if err := chownTo(path); err != nil {
+			return fmt.Errorf("授权 %s 失败: %w", path, err)
 		}
 	}
 

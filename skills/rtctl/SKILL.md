@@ -84,6 +84,9 @@ rtctl/
 - **shell 注册竞态**：`handleShellOpen` 必须同步注册会话（不能放 goroutine 里），否则紧跟的 shell_data 会被静默丢弃。
 - **file_put 注册竞态（实测踩过）**：`handleFilePut` 同样必须同步建临时文件并注册 `putFiles` 状态（不能在 goroutine 里），否则紧跟的分片查不到状态被静默丢弃、客户端永久等待 ack。凡"首消息建立状态 + 后续消息引用状态"的模式，建立必须同步。
 - **直连模式 token 校验边界（实测踩过）**：分片/流消息（file_put_chunk、shell_data/resize/close）不带 token，standalone 服务端如果对它们也查 token 会误拒（client 侧表现为 bad_token 报错）。只对发起类消息查 token。
+- **安装向导写配置文件必须 chown 服务账户（真机踩过）**：安装器以 root 运行，写的 0600 设备清单/审计日志归 root，低权限服务账户读不到 → 服务崩溃循环（"permission denied"）。写完后 `os.Chown` 给服务账户；审计日志文件需预创建并授权。
+- **覆盖安装先停旧服务（真机踩过）**：Linux 上不能覆盖正在运行的可执行文件（"text file busy"），安装器重装前必须 `systemctl stop` 旧服务。
+- **shell 管道输入 EOF 宽限（真机踩过）**：client 的 stdin 关闭后立即发 shell_close 会把远端 PTY 缓冲里没来得及执行的命令吞掉；EOF 后延迟 ~500ms 再发关闭。
 - **文件数据不可静默丢弃**：exec 输出可以丢帧+打 truncated 标记，但文件分片丢失 = 文件损坏，必须走阻塞发送（agent/server 两端）。
 - **Windows rename 语义**：`os.Rename` 不覆盖已存在目标，覆盖前先 `os.Remove`（仅 Windows）。
 - **Windows 输出编码**：中文系统 cmd 输出是 GBK；agent 侧有启发式转码（UTF-8 有效则原样，否则 GBK 解码），分片边界切开多字节字符时该片回退原样——接受该不完美性。
