@@ -77,7 +77,9 @@ irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.ps1 -OutFile de
 .\deploy.ps1
 ```
 
-菜单选项：`[1] 安装 agent`（被控端）· `[2] 安装 clientd`（AI Agent 直控服务）· `[3] 查看状态（运行+开机自启）` · `[4] 升级` · `[5] 卸载` · `[6] 退出`。
+菜单选项：`[1] 安装 agent`（被控端）· `[2] 安装 clientd`（AI Agent 直控服务）· `[3] 查看状态（运行+开机自启）` · `[4] 查看连接信息（复制 token/设备清单/验证命令）` · `[5] 升级` · `[6] 卸载` · `[7] 退出`。
+
+装完会**当场打印可复制的连接信息**；之后任何时间可用 `bash deploy.sh info`（Linux）或 `.\deploy.ps1 -Mode Info`（Windows）重新查看（无需 root）。
 
 **二进制向导版**（交互式问答，同样装完即运行 + 开机自启）：
 
@@ -85,6 +87,7 @@ irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.ps1 -OutFile de
 curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard-linux-amd64 -o rtctl-wizard
 chmod +x rtctl-wizard && ./rtctl-wizard        # Linux 非 root 自动提权
 ./rtctl-wizard status                          # 一键查看运行状态与开机自启
+./rtctl-wizard info                            # 一键查看连接信息（ID/地址/token/可复制的设备清单片段）
 ./rtctl-wizard uninstall agent|clientd|all     # 卸载
 ```
 

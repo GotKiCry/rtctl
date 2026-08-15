@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -69,6 +70,10 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "status" {
 		printStatus()
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "info" {
+		printInfo()
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "uninstall" {
@@ -418,21 +423,53 @@ func copyFile(src, dst string) error {
 	return err
 }
 
+// lanIPv4 返回第一个非回环 IPv4 地址（用于打印可直接复制的连接信息）。
+func lanIPv4() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			if v4 := ipn.IP.To4(); v4 != nil {
+				return v4.String()
+			}
+		}
+	}
+	return ""
+}
+
 // printSummary 安装完成后的引导信息。
 func printSummary(cfg *installConfig) {
+	ip := lanIPv4()
+	if ip == "" {
+		ip = "<本机IP>"
+	}
 	fmt.Println()
 	fmt.Println("================ 安装完成 ================")
 	switch cfg.component {
 	case "agent":
 		fmt.Printf("✔ agent 已安装并启动：监听 %s（开机自启）\n", cfg.listen)
+		fmt.Printf("  设备 ID:   %s\n", cfg.id)
 		fmt.Printf("  设备 token: %s（请妥善保存，控制端需要它）\n", cfg.token)
 		fmt.Println()
 		fmt.Println("  验证（任意装有 client 的机器）:")
-		fmt.Printf("    client -server ws://<本机IP>%s/ws exec -token %s 'uptime'\n", cfg.listen, cfg.token)
+		fmt.Printf("    client -server ws://%s%s/ws exec -token %s 'uptime'\n", ip, cfg.listen, cfg.token)
 		fmt.Println()
 		fmt.Println("  clientd 设备清单片段（复制到操作机 devices.json 即可直连）:")
-		fmt.Printf("    { \"devices\": [ { \"id\": %q, \"url\": \"ws://<本机IP>%s/ws\", \"token\": %q } ] }\n",
-			cfg.id, cfg.listen, cfg.token)
+		fmt.Printf("    { \"devices\": [ { \"id\": %q, \"url\": \"ws://%s%s/ws\", \"token\": %q } ] }\n",
+			cfg.id, ip, cfg.listen, cfg.token)
 		fmt.Println("  （生产环境建议启用 WSS）")
 	case "clientd":
 		fmt.Printf("✔ clientd 已安装并启动: http://%s（开机自启）\n", cfg.httpListen)

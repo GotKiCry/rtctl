@@ -20,12 +20,13 @@ irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.ps1 -OutFile de
   [1] 安装 agent（被控端）               ← 引导：设备ID → 端口 → token(自动生成/手动) → WSS
   [2] 安装 clientd（AI Agent 直控服务）   ← 引导：设备清单路径 → 监听地址 → API密钥
   [3] 查看状态（运行 + 开机自启）
-  [4] 升级到最新版
-  [5] 卸载组件
-  [6] 退出
+  [4] 查看连接信息（复制 token / 设备清单片段 / 验证命令，无需 root）
+  [5] 升级到最新版
+  [6] 卸载组件
+  [7] 退出
 ```
 
-装完**立即后台运行 + 开机自启**（Linux systemd enabled / Windows 计划任务开机触发），结尾打印验证命令与可复制的 clientd 设备清单片段。
+装完**立即后台运行 + 开机自启**（Linux systemd enabled / Windows 计划任务开机触发），结尾打印验证命令与可复制的 clientd 设备清单片段；之后 `bash deploy.sh info`（菜单选 4）随时重看。
 
 ## 二进制向导版（交互问答 + status/uninstall 子命令）
 
@@ -33,6 +34,7 @@ irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.ps1 -OutFile de
 curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard-linux-amd64 -o rtctl-wizard
 chmod +x rtctl-wizard && ./rtctl-wizard      # Linux 非 root 自动提权
 ./rtctl-wizard status                        # 查看运行状态与开机自启
+./rtctl-wizard info                          # 查看连接信息（ID/地址/token/可复制的设备清单片段）
 ./rtctl-wizard uninstall agent|clientd|all   # 卸载
 ```
 
@@ -41,7 +43,7 @@ chmod +x rtctl-wizard && ./rtctl-wizard      # Linux 非 root 自动提权
 ```bash
 bash deploy.sh agent --listen :8443 --id jp-tokyo-01 --token <token>      # 被控机
 bash deploy.sh clientd --devices devices.json                             # 操作机（AI Agent 入口）
-bash deploy.sh client / status / update agent|clientd / uninstall all
+bash deploy.sh client / status / info / update agent|clientd / uninstall all
 ```
 
 ## 选项

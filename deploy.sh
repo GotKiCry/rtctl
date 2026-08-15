@@ -7,11 +7,12 @@
 #     "https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.sh" \
 #     && chmod 700 /root/deploy.sh && /root/deploy.sh
 #
-# 无参数运行进入交互菜单（安装 / 状态 / 升级 / 卸载 / 退出）；
+# 无参数运行进入交互菜单（安装 / 状态 / 信息 / 升级 / 卸载 / 退出）；
 # 也支持非交互子命令（脚本化）:
 #   bash deploy.sh agent   --listen :8443 --id <设备ID> --token <token>
 #   bash deploy.sh clientd --devices <设备清单>
-#   bash deploy.sh status
+#   bash deploy.sh status        查看状态（无需 root）
+#   bash deploy.sh info          查看连接信息（无需 root）
 #   bash deploy.sh update  agent|clientd
 #   bash deploy.sh uninstall agent|clientd
 #
@@ -21,8 +22,14 @@
 
 set -euo pipefail
 
-# ---------- 自动提权（非 root 时 sudo 重执行） ----------
-if [[ $EUID -ne 0 ]]; then
+# ---------- 自动提权（非 root 时 sudo 重执行；status/info 只读，无需提权） ----------
+is_readonly_cmd() {
+  case "${1:-}" in
+    status|info|-h|--help) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+if [[ $EUID -ne 0 ]] && ! is_readonly_cmd "${1:-}"; then
   if command -v sudo >/dev/null 2>&1; then
     exec sudo bash "$(readlink -f "$0")" "$@"
   fi
@@ -151,11 +158,14 @@ EOF
   sleep 2
   systemctl is-active --quiet rtctl-agent || fail "启动失败，journalctl -u rtctl-agent 查看"
 
-  local port="${listen##*:}"
+  local port="${listen##*:}" ip
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [[ -n "$ip" ]] || ip="<本机IP>"
   log "✔ agent ($id) 已安装并启动：监听 $listen（后台运行 + 开机自启，低权限用户 $run_user）"
-  log "  验证: client -server ws://<本机IP>:$port/ws exec -token $token 'uptime'"
+  log "  验证: client -server ws://$ip:$port/ws exec -token $token 'uptime'"
   log "  clientd 设备清单片段:"
-  log "    { \"devices\": [ { \"id\": \"$id\", \"url\": \"ws://<本机IP>:$port/ws\", \"token\": \"$token\" } ] }"
+  log "    { \"devices\": [ { \"id\": \"$id\", \"url\": \"ws://$ip:$port/ws\", \"token\": \"$token\" } ] }"
+  log "  以后随时查看以上信息: bash deploy.sh info（菜单选 4）"
 }
 
 # ---------- 安装: clientd ----------
@@ -208,6 +218,7 @@ EOF
   log "✔ clientd 已安装并启动：http://$listen（后台运行 + 开机自启）"
   log "  API 密钥: $api_key（Authorization: Bearer $api_key）"
   log "  测试: curl -H 'Authorization: Bearer $api_key' http://$listen/api/v1/devices"
+  log "  以后随时查看以上信息: bash deploy.sh info（菜单选 4）"
 }
 
 # ---------- 状态 ----------
@@ -228,6 +239,48 @@ cmd_status() {
     printf "  %-12s %-18s %s\n" "${u#rtctl-}" "$a" "$e"
   done
   echo
+}
+
+# ---------- 连接信息（复制用） ----------
+
+cmd_info() {
+  echo -e "${C_CYAN}================ 连接信息（直接复制） ================${C_NC}"
+  if systemctl cat rtctl-agent >/dev/null 2>&1; then
+    local unit_text exec_line token listen id port ip
+    unit_text="$(systemctl cat rtctl-agent 2>/dev/null)"
+    exec_line="$(echo "$unit_text" | grep '^ExecStart=' | head -1)"
+    listen="$(echo "$exec_line" | grep -o '\-listen [^ ]*' | awk '{print $2}' | tr -d '"')"
+    id="$(echo "$exec_line" | grep -o '\-id [^ ]*' | awk '{print $2}' | tr -d '"')"
+    token="$(echo "$unit_text" | grep '^Environment=RTCTL_TOKEN=' | head -1 | sed 's/^Environment=RTCTL_TOKEN=//' | tr -d '"')"
+    [[ -n "$token" ]] || token='(token 未配置)'
+    port="${listen##*:}"
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    [[ -n "$ip" ]] || ip="<本机IP>"
+
+    echo -e "  ${C_GREEN}设备 ID:${C_NC}   $id"
+    echo -e "  ${C_GREEN}监听地址:${C_NC} $listen"
+    echo -e "  ${C_GREEN}token:${C_NC}     $token"
+    echo
+    echo -e "  ${C_YELLOW}── clientd 设备清单片段（复制到控制机 devices.json 即可直连）──${C_NC}"
+    echo "  { \"devices\": [ { \"id\": \"$id\", \"url\": \"ws://$ip:$port/ws\", \"token\": \"$token\" } ] }"
+    echo
+    echo -e "  ${C_YELLOW}── 验证命令（任意有 client 的机器）──${C_NC}"
+    echo "  client -server ws://$ip:$port/ws exec -token $token 'uptime'"
+  else
+    warn "agent 未安装（菜单选 1 先安装）"
+  fi
+
+  if systemctl cat rtctl-clientd >/dev/null 2>&1; then
+    local hl api_key
+    hl="$(systemctl cat rtctl-clientd 2>/dev/null | grep '^ExecStart=' | head -1 | grep -o '\-listen [^ ]*' | awk '{print $2}' | tr -d '"')"
+    api_key="$(systemctl cat rtctl-clientd 2>/dev/null | grep '^ExecStart=' | head -1 | grep -o '\-api-key [^ ]*' | awk '{print $2}' | tr -d '"')"
+    echo
+    echo -e "  ${C_GREEN}── clientd（AI Agent 直控入口）──${C_NC}"
+    echo -e "  ${C_GREEN}HTTP 地址:${C_NC} http://$hl"
+    echo -e "  ${C_GREEN}API 密钥:${C_NC}  $api_key"
+    echo "  调用示例: curl -H 'Authorization: Bearer $api_key' -d '{\"device_id\":\"<设备ID>\",\"cmd\":\"uptime\"}' http://$hl/api/v1/exec"
+  fi
+  echo -e "${C_CYAN}====================================================${C_NC}"
 }
 
 # ---------- 卸载 ----------
@@ -318,20 +371,22 @@ menu() {
     echo -e "  ${C_GREEN}[1]${C_NC} 安装 agent ——【被控制的服务器】装这个（一台机器一个，装完等别人来控）"
     echo -e "  ${C_GREEN}[2]${C_NC} 安装 clientd ——【你操作的那台机器】装这个（AI Agent 通过它控制所有设备）"
     echo -e "  ${C_GREEN}[3]${C_NC} 查看状态（运行 + 开机自启）"
-    echo -e "  ${C_GREEN}[4]${C_NC} 升级到最新版"
-    echo -e "  ${C_GREEN}[5]${C_NC} 卸载组件"
-    echo -e "  ${C_GREEN}[6]${C_NC} 退出"
-    read -rp "请选择 [6]: " choice
-    case "${choice:-6}" in
+    echo -e "  ${C_GREEN}[4]${C_NC} 查看连接信息（复制 token / 设备清单 / 验证命令）"
+    echo -e "  ${C_GREEN}[5]${C_NC} 升级到最新版"
+    echo -e "  ${C_GREEN}[6]${C_NC} 卸载组件"
+    echo -e "  ${C_GREEN}[7]${C_NC} 退出"
+    read -rp "请选择 [7]: " choice
+    case "${choice:-7}" in
       1) menu_agent ;;
       2) menu_clientd ;;
       3) cmd_status ;;
-      4)
+      4) cmd_info ;;
+      5)
         read -rp "升级组件 [1] agent [2] clientd: " uc
         case "${uc:-1}" in 1) cmd_update agent ;; 2) cmd_update clientd ;; *) warn "跳过" ;; esac
         ;;
-      5) cmd_uninstall ;;
-      6) log "再见"; exit 0 ;;
+      6) cmd_uninstall ;;
+      7) log "再见"; exit 0 ;;
       *) warn "无效选择" ;;
     esac
   done
@@ -343,6 +398,7 @@ case "${1:-}" in
   agent)     shift; cmd_agent "$@" ;;
   clientd)   shift; cmd_clientd "$@" ;;
   status)    cmd_status ;;
+  info)      cmd_info ;;
   uninstall) shift; cmd_uninstall "${1:-}" ;;
   update)    shift; cmd_update "${1:-}" ;;
   client)
@@ -360,6 +416,7 @@ rtctl 一键部署（纯直连版）
   bash deploy.sh clientd   --devices <设备清单> [--listen 127.0.0.1:18080] [--api-key K]
   bash deploy.sh client    仅下载 client 二进制
   bash deploy.sh status    查看状态
+  bash deploy.sh info      查看连接信息（token / 设备清单 / 验证命令）
   bash deploy.sh update    agent|clientd
   bash deploy.sh uninstall agent|clientd|all
 

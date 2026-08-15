@@ -57,6 +57,32 @@ func TestBuildLinuxPlanUnknown(t *testing.T) {
 	}
 }
 
+func TestArgAfter(t *testing.T) {
+	line := `-listen ":8443" -id "jp-tokyo-01" -tls-cert "/a b/c.pem"`
+	for flag, want := range map[string]string{
+		"-listen":   ":8443",
+		"-id":       "jp-tokyo-01",
+		"-tls-cert": "/a", // 空格在引号内：解析器只取第一个空白分隔 token（listen/id/token 不含空格，够用）
+	} {
+		if got := argAfter(line, flag); got != want {
+			t.Errorf("argAfter(%q)=%q want %q", flag, got, want)
+		}
+	}
+	if got := argAfter(line, "-nope"); got != "" {
+		t.Errorf("未知 flag 应返回空串，got %q", got)
+	}
+}
+
+func TestReGroup(t *testing.T) {
+	raw := `<Arguments>-listen &quot;:8443&quot;</Arguments>`
+	if got := reGroup(raw, `(?s)<Arguments>(.*?)</Arguments>`); got != `-listen &quot;:8443&quot;` {
+		t.Errorf("reGroup=%q", got)
+	}
+	if got := reGroup("no match", `(?s)<Arguments>(.*?)</Arguments>`); got != "" {
+		t.Errorf("未匹配应返回空串，got %q", got)
+	}
+}
+
 func TestBuildWinPlanAgentDirect(t *testing.T) {
 	cfg := &installConfig{component: "agent", id: "jp-tokyo-01", listen: ":8443", token: "tok-win"}
 	plan, err := buildWinPlan(cfg, `C:\Program Files\rtctl`)

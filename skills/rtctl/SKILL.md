@@ -15,7 +15,7 @@ rtctl/
 ├── cmd/agent         # 被控端入口（-listen 直连监听）
 ├── cmd/client        # CLI：main.go(list/exec/shell) + file.go(文件传输) + serve.go(clientd HTTP 服务)
 ├── cmd/installer     # rtctl-wizard 二进制安装向导（agent/clientd/client 三组件）
-├── deploy.sh/.ps1    # 脚本化部署（agent/clientd/client/update）
+├── deploy.sh/.ps1    # 脚本化部署（agent/clientd/client/status/info/update/uninstall）
 └── internal/
     ├── proto         # 消息外壳 + 各 payload + 错误码常量（协议唯一定义处）
     ├── agent         # 执行器 + standalone.go(直连服务端)（linux/windows 分平台）
@@ -79,6 +79,7 @@ rtctl/
 - **shell 管道输入 EOF 宽限**：client 的 stdin 关闭后立即发 shell_close 会把远端 PTY 缓冲里没来得及执行的命令吞掉；EOF 后延迟 ~500ms 再发关闭。
 - **Windows 输出编码**：中文系统 cmd 输出是 GBK；agent 侧启发式转码（UTF-8 有效则原样，否则 GBK 解码），分片边界切开多字节字符时该片回退原样——接受该不完美性。
 - **安装器二进制命名**：文件名不要含 install/setup/update/patch——Windows 安装器启发式会对这类名字强制提权/拦截（实测）。当前命名 `rtctl-wizard`。
+- **部署信息可复现**：装完当场打印连接信息（ID/地址/token/devices.json 片段/验证命令）；之后 `bash deploy.sh info`（菜单 4，无需 root）/ `rtctl-wizard info` / `deploy.ps1 -Mode Info` 重新查看。信息从 systemd unit（`systemctl cat` 的 ExecStart/Environment 行）或计划任务 XML 提取，不是存储新文件。
 - `-race` 构建在 Windows 需要 cgo（gcc）；本机没有时改用功能性测试替代。
 
 ## 修改检查清单
