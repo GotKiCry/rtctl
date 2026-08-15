@@ -214,13 +214,18 @@ EOF
 
 cmd_status() {
   echo -e "${C_CYAN}rtctl 组件状态:${C_NC}"
-  printf "  %-12s %-16s %s\n" "组件" "运行状态" "开机自启"
+  printf "  %-12s %-18s %s\n" "组件" "运行状态" "开机自启"
   echo "  --------------------------------------------"
   for u in rtctl-agent rtctl-clientd; do
     local a e
-    a="$(systemctl is-active $u 2>/dev/null || echo 未安装)"
-    e="$(systemctl is-enabled $u 2>/dev/null || echo 未安装)"
-    printf "  %-12s %-16s %s\n" "${u#rtctl-}" "$a" "$e"
+    if systemctl cat "$u" >/dev/null 2>&1; then
+      a="$(systemctl is-active "$u" 2>/dev/null || echo 已安装未运行)"
+      e="$(systemctl is-enabled "$u" 2>/dev/null || echo 未启用)"
+    else
+      a="未安装"
+      e="未安装"
+    fi
+    printf "  %-12s %-18s %s\n" "${u#rtctl-}" "$a" "$e"
   done
   echo
 }
@@ -308,9 +313,10 @@ menu() {
     echo
     echo -e "${C_CYAN}========================================${C_NC}"
     echo -e "${C_CYAN}   rtctl 远程终端控制 — 管理菜单（纯直连）${C_NC}"
+    echo -e "${C_CYAN}   本机角色: 被控制(装agent) / 控制台(装clientd)${C_NC}"
     echo -e "${C_CYAN}========================================${C_NC}"
-    echo -e "  ${C_GREEN}[1]${C_NC} 安装 agent（被控端）"
-    echo -e "  ${C_GREEN}[2]${C_NC} 安装 clientd（AI Agent 直控服务）"
+    echo -e "  ${C_GREEN}[1]${C_NC} 安装 agent ——【被控制的服务器】装这个（一台机器一个，装完等别人来控）"
+    echo -e "  ${C_GREEN}[2]${C_NC} 安装 clientd ——【你操作的那台机器】装这个（AI Agent 通过它控制所有设备）"
     echo -e "  ${C_GREEN}[3]${C_NC} 查看状态（运行 + 开机自启）"
     echo -e "  ${C_GREEN}[4]${C_NC} 升级到最新版"
     echo -e "  ${C_GREEN}[5]${C_NC} 卸载组件"

@@ -16,15 +16,19 @@ type statusService struct {
 }
 
 func queryLinux(unit string) (active, enabled string) {
-	if out, err := exec.Command("systemctl", "is-active", unit).CombinedOutput(); err == nil {
+	// 先判断是否安装（systemctl cat 找不到 unit 即未安装）
+	if err := exec.Command("systemctl", "cat", unit).Run(); err != nil {
+		return "未安装", "未安装"
+	}
+	if out, err := exec.Command("systemctl", "is-active", unit).Output(); err == nil {
 		active = strings.TrimSpace(string(out))
 	} else {
-		active = "未安装"
+		active = "已安装未运行"
 	}
-	if out, err := exec.Command("systemctl", "is-enabled", unit).CombinedOutput(); err == nil {
+	if out, err := exec.Command("systemctl", "is-enabled", unit).Output(); err == nil {
 		enabled = strings.TrimSpace(string(out))
 	} else {
-		enabled = "未安装"
+		enabled = "未启用"
 	}
 	return
 }
