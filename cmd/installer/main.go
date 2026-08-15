@@ -29,6 +29,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 const ghBaseDefault = "https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin"
@@ -150,11 +152,20 @@ func genToken() string {
 	return hex.EncodeToString(b)
 }
 
+// interactive 判断 stdin 是否为终端：非交互（脚本/管道）时不提问，用默认值。
+// x/term 在 Windows 上走 GetConsoleMode，比 Stat 字符设备判断可靠。
+func interactive() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
 // wizard 交互式收集安装参数（flags 已给的跳过提问）。
 func wizard() (*installConfig, error) {
 	cfg := &installConfig{component: *flComponent}
 
 	if cfg.component == "" {
+		if !interactive() {
+			return nil, errors.New("非交互模式需要 --component（agent / clientd / server / client）")
+		}
 		cfg.component = []string{"agent", "clientd", "server", "client"}[askChoice(
 			"=== rtctl 一键安装向导 ===\n选择要安装的组件:",
 			[]string{
@@ -168,11 +179,14 @@ func wizard() (*installConfig, error) {
 	case "agent":
 		cfg.id = *flID
 		if cfg.id == "" {
+			if !interactive() {
+				return nil, errors.New("非交互模式需要 --id")
+			}
 			cfg.id = ask("设备 ID（唯一名称，如 jp-tokyo-01）", "")
 		}
 		if *flListen != "" || *flServerURL != "" {
 			cfg.listen, cfg.serverURL = *flListen, *flServerURL
-		} else {
+		} else if interactive() {
 			mode := askChoice("接入方式:",
 				[]string{"直连（推荐：目标机可被访问，无需中继）", "中继（NAT 后无法直连）"}, 0)
 			if mode == 0 {
@@ -180,13 +194,15 @@ func wizard() (*installConfig, error) {
 			} else {
 				cfg.serverURL = ask("中继服务器地址", "wss://中继IP:8443/ws?role=agent")
 			}
+		} else {
+			return nil, errors.New("非交互模式需要 --listen（直连）或 --server-url（中继）")
 		}
 		if cfg.listen != "" && !strings.Contains(cfg.listen, ":") {
 			cfg.listen = ":" + cfg.listen
 		}
 		cfg.token = *flToken
 		if cfg.token == "" {
-			if *flGenToken {
+			if *flGenToken || !interactive() {
 				cfg.token = genToken()
 			} else {
 				choice := askChoice("设备 token:",
@@ -202,7 +218,7 @@ func wizard() (*installConfig, error) {
 			}
 		}
 		cfg.tlsCert, cfg.tlsKey = *flTLSCert, *flTLSKey
-		if cfg.listen != "" && cfg.tlsCert == "" && askYesNo("启用 WSS（需要证书路径）?", false) {
+		if cfg.listen != "" && cfg.tlsCert == "" && interactive() && askYesNo("启用 WSS（需要证书路径）?", false) {
 			cfg.tlsCert = ask("证书路径", "")
 			cfg.tlsKey = ask("私钥路径", "")
 		}
@@ -213,18 +229,20 @@ func wizard() (*installConfig, error) {
 			cfg.httpListen = "127.0.0.1:" + cfg.httpListen
 		}
 		cfg.devices = *flDevices
-		cfg.devices = ask("设备清单文件路径（先准备好，条目带 url 直连、不带 url 经中继）", cfg.devices)
+		if interactive() {
+			cfg.devices = ask("设备清单文件路径（先准备好，条目带 url 直连、不带 url 经中继）", cfg.devices)
+		}
 		if _, err := os.Stat(cfg.devices); err != nil {
 			return nil, fmt.Errorf("设备清单不存在: %s", cfg.devices)
 		}
 		cfg.serverURL = *flServerURL
-		if cfg.serverURL == "" && askYesNo("清单里有不带 url 的设备（需经中继）?", false) {
+		if cfg.serverURL == "" && interactive() && askYesNo("清单里有不带 url 的设备（需经中继）?", false) {
 			cfg.serverURL = ask("中继服务器地址", "wss://中继IP:8443/ws?role=client")
 			cfg.clientKey = ask("中继客户端密钥", "")
 		}
 		cfg.apiKey = *flAPIKey
 		if cfg.apiKey == "" {
-			if *flGenAPIKey {
+			if *flGenAPIKey || !interactive() {
 				cfg.apiKey = genToken()
 			} else {
 				choice := askChoice("HTTP API 密钥:",
@@ -250,6 +268,9 @@ func wizard() (*installConfig, error) {
 			}
 		}
 		if len(cfg.deviceIDs) == 0 {
+			if !interactive() {
+				return nil, errors.New("非交互模式需要 --device-ids（逗号分隔）")
+			}
 			ids := ask("设备 ID 列表（逗号分隔，如 jp-tokyo-01,web-01）", "")
 			for _, id := range strings.Split(ids, ",") {
 				if id = strings.TrimSpace(id); id != "" {
@@ -262,7 +283,7 @@ func wizard() (*installConfig, error) {
 		}
 		cfg.clientKey = *flClientKey
 		if cfg.clientKey == "" {
-			if *flGenToken {
+			if *flGenToken || !interactive() {
 				cfg.clientKey = genToken()
 			} else {
 				choice := askChoice("客户端密钥（client/clientd 连接中继用）:",
@@ -275,7 +296,7 @@ func wizard() (*installConfig, error) {
 			}
 		}
 		cfg.tlsCert, cfg.tlsKey = *flTLSCert, *flTLSKey
-		if cfg.tlsCert == "" && askYesNo("启用 WSS（需要证书路径）?", false) {
+		if cfg.tlsCert == "" && interactive() && askYesNo("启用 WSS（需要证书路径）?", false) {
 			cfg.tlsCert = ask("证书路径", "")
 			cfg.tlsKey = ask("私钥路径", "")
 		}
@@ -397,7 +418,20 @@ func runInstall(cfg *installConfig) error {
 	}
 	if *flDryRun {
 		fmt.Printf("[dry-run] 组件=%s 二进制=%s\n", cfg.component, binPath)
-		if plan, err := buildLinuxPlan(cfg); err == nil {
+		if runtime.GOOS == "windows" {
+			if plan, err := buildWinPlan(cfg, `C:\Program Files\rtctl`); err == nil {
+				fmt.Printf("[dry-run] 将安装到 %s\n", plan.exePath)
+				fmt.Printf("[dry-run] 计划任务 %s 参数: %s\n", plan.taskName, plan.args)
+				if xmlBytes, err := buildTaskXML(cfg, plan.exePath, plan.args); err == nil {
+					fmt.Printf("[dry-run] 任务 XML 已生成（%d 字节，UTF-16LE；开机触发 + 崩溃每分钟重试）\n", len(xmlBytes))
+				}
+				for path, content := range plan.extra {
+					if path != "__env_token__" {
+						fmt.Printf("[dry-run] 将写入 %s (0600):\n%s\n", path, content)
+					}
+				}
+			}
+		} else if plan, err := buildLinuxPlan(cfg); err == nil {
 			fmt.Println("[dry-run] systemd unit 内容:")
 			fmt.Println(strings.Repeat("-", 50))
 			fmt.Println(plan.unit)

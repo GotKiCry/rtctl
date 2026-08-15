@@ -74,6 +74,10 @@ CLI 同样支持文件传输：`client file-put -token T local.txt /etc/remote.t
 curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard-linux-amd64 -o rtctl-wizard
 chmod +x rtctl-wizard && sudo ./rtctl-wizard
 
+# Windows（管理员 PowerShell，一条指令）
+# irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard.exe -OutFile rtctl-wizard.exe
+# .\rtctl-wizard.exe
+
 # 非交互（脚本化）:
 sudo ./rtctl-wizard --component agent --id jp-tokyo-01 --listen :8443 --gen-token
 sudo ./rtctl-wizard --component clientd --devices devices.json --gen-api-key
@@ -83,7 +87,7 @@ sudo ./rtctl-wizard --component clientd --devices devices.json --gen-api-key
 
 向导结尾会打印：验证命令、生成的 token / API 密钥、可复制的 clientd 设备清单片段。
 
-脚本化部署（`deploy.sh` / `deploy.ps1`，含 Windows）仍可用，详见 [deploy/README.md](deploy/README.md)。
+脚本化部署（`deploy.sh` / `deploy.ps1`）仍可用，详见 [deploy/README.md](deploy/README.md)。
 
 ## 安全
 

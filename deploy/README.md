@@ -1,14 +1,20 @@
 # rtctl 一键部署
 
-**推荐：二进制向导（一条指令，交互式引导）**——Linux 优先：
+**推荐：二进制向导（一条指令，交互式引导）**：
 
 ```bash
-# 一条指令：下载向导并运行（引导选组件、端口、token 自动生成或自定义）
+# Linux（被控机/操作机/中心机通用）
 curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard-linux-amd64 -o rtctl-wizard
 chmod +x rtctl-wizard && sudo ./rtctl-wizard
 ```
 
-向导覆盖四种组件：**agent 被控端**（直连/中继）、**clientd 控制服务**（AI Agent 入口）、**server 中继**（NAT 场景可选）、**client**（仅下载）。装完立即运行 + 开机自启（systemd），结尾打印验证命令与可复制的 clientd 设备清单片段。
+```powershell
+# Windows（管理员 PowerShell）
+irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard.exe -OutFile rtctl-wizard.exe
+.\rtctl-wizard.exe
+```
+
+向导覆盖四种组件：**agent 被控端**（直连/中继）、**clientd 控制服务**（AI Agent 入口）、**server 中继**（NAT 场景可选）、**client**（仅下载）。装完立即运行 + 开机自启（Linux systemd / Windows 计划任务），结尾打印验证命令与可复制的 clientd 设备清单片段。
 
 非交互（脚本化）与预览：
 
@@ -16,7 +22,7 @@ chmod +x rtctl-wizard && sudo ./rtctl-wizard
 sudo ./rtctl-wizard --component agent --id jp-tokyo-01 --listen :8443 --gen-token
 sudo ./rtctl-wizard --component server --port 8443 --device-ids jp-tokyo-01,web-01 --gen-token
 sudo ./rtctl-wizard --component clientd --devices devices.json --gen-api-key
-./rtctl-wizard --component agent --id X --listen :8443 --token T --dry-run   # 只预览 systemd unit
+./rtctl-wizard --component agent --id X --listen :8443 --token T --dry-run   # 只预览不安装
 ```
 
 **脚本版**（Linux `deploy.sh` / Windows `deploy.ps1`，自动下载二进制）仍可用：
