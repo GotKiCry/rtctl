@@ -1,6 +1,15 @@
 // serve.go —— rtctl-client serve：常驻 HTTP 服务。
 // AI Agent / 自动化程序通过本服务操控目标设备，无需处理 token、无需手动传输文件。
 //
+// 两种设备接入方式（可在同一份设备清单中混用）：
+//   - 直连：设备清单中带 url 的条目，clientd 直接连接 agent 的 WS 端口（无需中继）
+//   - 中继：不带 url 的条目，经 -server 指定的中继服务器转发（NAT 场景）
+//
+// 设备清单格式（与 server 的 devices.json 兼容，url 可选）:
+//
+//	{ "devices": [ { "id": "jp", "url": "wss://1.2.3.4:8443/ws", "token": "..." },
+//	               { "id": "web-01", "token": "..." } ] }
+//
 // API（Authorization: Bearer <api-key>）:
 //
 //	GET  /healthz                     健康检查（免认证）
@@ -33,12 +42,20 @@ import (
 
 const serveChunkSize = 256 * 1024
 
-// serveConfig 本地设备清单（device_id -> token），格式与 server 的 devices.json 相同。
+// serveConfig 本地设备清单（device_id -> token[+url]）。
 type serveConfig struct {
 	Devices []struct {
 		ID    string `json:"id"`
 		Token string `json:"token"`
+		URL   string `json:"url,omitempty"` // 直连地址（ws://或wss://），留空经中继
 	} `json:"devices"`
+}
+
+// deviceTarget 一个设备的接入信息。
+type deviceTarget struct {
+	id    string
+	token string
+	url   string // 空 = 经中继
 }
 
 // wsHub 与中继的常驻连接：写队列 + 按消息 ID 分发响应。
@@ -256,13 +273,13 @@ func (h *wsHub) unregister(id string) {
 type serveAPI struct {
 	hub     *wsHub
 	apiKey  string
-	devices map[string]string // device_id -> token
+	devices map[string]deviceTarget
 }
 
 func cmdServe(args []string) error {
 	sub := flag.NewFlagSet("serve", flag.ExitOnError)
 	listen := sub.String("listen", "127.0.0.1:18080", "HTTP 监听地址（Agent 调用入口）")
-	devicesFile := sub.String("devices", "devices.json", "设备清单（device_id -> token，与 server 同格式）")
+	devicesFile := sub.String("devices", "devices.json", "设备清单（device_id -> token[+url]，url 留空经中继）")
 	apiKey := sub.String("api-key", "", "API 密钥（留空自动生成并打印一次）")
 	sub.Parse(args)
 
@@ -274,12 +291,12 @@ func cmdServe(args []string) error {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return fmt.Errorf("解析设备清单失败: %w", err)
 	}
-	devices := make(map[string]string, len(cfg.Devices))
+	devices := make(map[string]deviceTarget, len(cfg.Devices))
 	for _, d := range cfg.Devices {
 		if d.ID == "" || d.Token == "" {
 			return errors.New("设备清单存在空 id 或空 token")
 		}
-		devices[d.ID] = d.Token
+		devices[d.ID] = deviceTarget{id: d.ID, token: d.Token, url: d.URL}
 	}
 	if len(devices) == 0 {
 		return errors.New("设备清单为空")
@@ -333,47 +350,129 @@ func writeErr(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]any{"error": msg, "error_code": code})
 }
 
-// handleDevices 设备列表（含在线状态与元数据）。
-func (a *serveAPI) handleDevices(w http.ResponseWriter, r *http.Request) {
-	a.hub.listMu.Lock()
-	defer a.hub.listMu.Unlock()
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-	// 清空历史 ack
-	for {
-		select {
-		case <-a.hub.listCh:
-		default:
-			goto drained
-		}
+// dialDirect 直连设备：拨号 + auth 握手。
+func dialDirect(ctx context.Context, url string) (*websocket.Conn, error) {
+	d := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	conn, _, err := d.DialContext(ctx, url, nil)
+	if err != nil {
+		return nil, err
 	}
-drained:
-	if err := a.hub.sendRaw(proto.Msg{Type: proto.TypeList}); err != nil {
-		writeErr(w, http.StatusBadGateway, proto.ErrorCodeConnLost, err.Error())
-		return
+	cid := clientID
+	if cid == "" {
+		cid = "clientd"
 	}
-	select {
-	case m := <-a.hub.listCh:
-		var p proto.ListAckPayload
-		if err := m.PayloadOf(&p); err != nil {
-			writeErr(w, http.StatusBadGateway, proto.ErrorCodeInternal, "解析设备列表失败")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"devices": p.Devices})
-	case <-ctx.Done():
-		writeErr(w, http.StatusGatewayTimeout, proto.ErrorCodeTimeout, "获取设备列表超时")
+	auth, _ := proto.WithPayload(proto.Msg{Type: proto.TypeAuth}, proto.AuthPayload{ID: cid})
+	if err := conn.WriteJSON(auth); err != nil {
+		conn.Close()
+		return nil, err
 	}
+	var ack proto.Msg
+	if err := conn.ReadJSON(&ack); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	var p proto.AuthAckPayload
+	ack.PayloadOf(&p)
+	if !p.OK {
+		conn.Close()
+		return nil, errors.New(p.Error)
+	}
+	return conn, nil
 }
 
-// handleExec 执行命令并等待完成。
-func (a *serveAPI) handleExec(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		DeviceID  string `json:"device_id"`
-		Cmd       string `json:"cmd"`
-		TimeoutMS int    `json:"timeout_ms"`
-		Workdir   string `json:"workdir"`
-		Stdin     string `json:"stdin"`
+// probeDirect 直连设备探活：返回设备信息（失败返回 offline 与错误）。
+func probeDirect(ctx context.Context, tgt deviceTarget) proto.DeviceInfo {
+	info := proto.DeviceInfo{ID: tgt.id}
+	conn, err := dialDirect(ctx, tgt.url)
+	if err != nil {
+		return info
 	}
+	defer conn.Close()
+	if err := conn.WriteJSON(proto.Msg{Type: proto.TypeList}); err != nil {
+		return info
+	}
+	var m proto.Msg
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if err := conn.ReadJSON(&m); err != nil || m.Type != proto.TypeListAck {
+		return info
+	}
+	var p proto.ListAckPayload
+	if m.PayloadOf(&p) == nil && len(p.Devices) > 0 {
+		d := p.Devices[0]
+		d.ID = tgt.id
+		return d
+	}
+	return info
+}
+
+// handleDevices 设备列表：中继设备 + 直连设备（逐个探活）。
+func (a *serveAPI) handleDevices(w http.ResponseWriter, r *http.Request) {
+	relayDevices := map[string]proto.DeviceInfo{}
+	var direct []deviceTarget
+	for _, t := range a.devices {
+		if t.url == "" {
+			relayDevices[t.id] = proto.DeviceInfo{ID: t.id}
+		} else {
+			direct = append(direct, t)
+		}
+	}
+	if len(relayDevices) > 0 {
+		a.hub.listMu.Lock()
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		for {
+			select {
+			case <-a.hub.listCh:
+			default:
+				goto drained
+			}
+		}
+	drained:
+		if err := a.hub.sendRaw(proto.Msg{Type: proto.TypeList}); err == nil {
+			select {
+			case m := <-a.hub.listCh:
+				var p proto.ListAckPayload
+				if m.PayloadOf(&p) == nil {
+					for _, d := range p.Devices {
+						relayDevices[d.ID] = d
+					}
+				}
+			case <-ctx.Done():
+			}
+		}
+		cancel()
+		a.hub.listMu.Unlock()
+	}
+
+	out := make([]proto.DeviceInfo, 0, len(a.devices))
+	seen := map[string]bool{}
+	for _, t := range a.devices {
+		if t.url != "" {
+			probeCtx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+			out = append(out, probeDirect(probeCtx, t))
+			cancel()
+			seen[t.id] = true
+		}
+	}
+	for id, d := range relayDevices {
+		if !seen[id] {
+			out = append(out, d)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"devices": out})
+}
+
+// execReq exec 请求体。
+type execReq struct {
+	DeviceID  string `json:"device_id"`
+	Cmd       string `json:"cmd"`
+	TimeoutMS int    `json:"timeout_ms"`
+	Workdir   string `json:"workdir"`
+	Stdin     string `json:"stdin"`
+}
+
+// handleExec 执行命令并等待完成（直连/中继自动分派）。
+func (a *serveAPI) handleExec(w http.ResponseWriter, r *http.Request) {
+	var req execReq
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, proto.ErrorCodeBadPayload, "请求体无效")
 		return
@@ -382,11 +481,84 @@ func (a *serveAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, proto.ErrorCodeBadPayload, "device_id 与 cmd 必填")
 		return
 	}
-	token, ok := a.devices[req.DeviceID]
+	tgt, ok := a.devices[req.DeviceID]
 	if !ok {
 		writeErr(w, http.StatusBadRequest, proto.ErrorCodeBadDevice, "未知设备: "+req.DeviceID)
 		return
 	}
+	if tgt.url != "" {
+		a.execDirect(w, r, tgt, req)
+		return
+	}
+	a.execRelay(w, r, tgt, req)
+}
+
+// execDirect 直连设备：独立连接 + 单次执行。
+func (a *serveAPI) execDirect(w http.ResponseWriter, r *http.Request, tgt deviceTarget, req execReq) {
+	overall := 1 * time.Hour
+	if req.TimeoutMS > 0 {
+		overall = time.Duration(req.TimeoutMS)*time.Millisecond + 30*time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), overall)
+	defer cancel()
+	conn, err := dialDirect(ctx, tgt.url)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, proto.ErrorCodeConnLost, "连接设备失败: "+err.Error())
+		return
+	}
+	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(overall))
+
+	id := idutil.New()
+	m := proto.Msg{Type: proto.TypeExec, ID: id, Token: tgt.token}
+	m, _ = proto.WithPayload(m, proto.ExecPayload{Cmd: req.Cmd, TimeoutMS: req.TimeoutMS, Workdir: req.Workdir, Stdin: req.Stdin})
+	if err := conn.WriteJSON(m); err != nil {
+		writeErr(w, http.StatusBadGateway, proto.ErrorCodeConnLost, err.Error())
+		return
+	}
+	var sb strings.Builder
+	start := time.Now()
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			if ctx.Err() != nil {
+				writeErr(w, http.StatusGatewayTimeout, proto.ErrorCodeTimeout, "执行超时")
+				return
+			}
+			writeErr(w, http.StatusBadGateway, proto.ErrorCodeConnLost, "连接中断: "+err.Error())
+			return
+		}
+		var msg proto.Msg
+		if err := json.Unmarshal(data, &msg); err != nil {
+			continue
+		}
+		switch msg.Type {
+		case proto.TypeExecOutput:
+			var p proto.ExecOutputPayload
+			msg.PayloadOf(&p)
+			sb.WriteString(p.Data)
+			if p.Done {
+				writeJSON(w, http.StatusOK, map[string]any{
+					"exit_code":   p.ExitCode,
+					"output":      sb.String(),
+					"truncated":   p.Truncated,
+					"error":       p.Error,
+					"error_code":  p.ErrorCode,
+					"duration_ms": time.Since(start).Milliseconds(),
+				})
+				return
+			}
+		case proto.TypeError:
+			var p proto.ErrorPayload
+			msg.PayloadOf(&p)
+			writeErr(w, http.StatusBadGateway, p.Code, p.Error)
+			return
+		}
+	}
+}
+
+// execRelay 中继设备：经常驻中继连接执行。
+func (a *serveAPI) execRelay(w http.ResponseWriter, r *http.Request, tgt deviceTarget, req execReq) {
 	id := idutil.New()
 	overall := 1 * time.Hour
 	if req.TimeoutMS > 0 {
@@ -395,7 +567,7 @@ func (a *serveAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), overall)
 	defer cancel()
 
-	m := proto.Msg{Type: proto.TypeExec, ID: id, Token: token}
+	m := proto.Msg{Type: proto.TypeExec, ID: id, Token: tgt.token}
 	m, _ = proto.WithPayload(m, proto.ExecPayload{Cmd: req.Cmd, TimeoutMS: req.TimeoutMS, Workdir: req.Workdir, Stdin: req.Stdin})
 	ch, dead, err := a.hub.request(ctx, m)
 	if err != nil {
@@ -410,7 +582,7 @@ func (a *serveAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			// 调用方超时/断开：取消远端执行，避免孤儿进程
-			kill, _ := proto.WithPayload(proto.Msg{Type: proto.TypeExecKill, Token: token},
+			kill, _ := proto.WithPayload(proto.Msg{Type: proto.TypeExecKill, Token: tgt.token},
 				proto.ExecKillPayload{ExecID: id})
 			a.hub.sendRaw(kill)
 			writeErr(w, http.StatusGatewayTimeout, proto.ErrorCodeTimeout, "执行超时")
@@ -445,7 +617,7 @@ func (a *serveAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleUpload 上传文件（请求体为 JSON，data 为 base64）。
+// handleUpload 上传文件（data 为 base64）。
 func (a *serveAPI) handleUpload(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DeviceID string `json:"device_id"`
@@ -470,17 +642,86 @@ func (a *serveAPI) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, proto.ErrorCodeBadPayload, "文件过大（上限 128MB）")
 		return
 	}
-	token, ok := a.devices[req.DeviceID]
+	tgt, ok := a.devices[req.DeviceID]
 	if !ok {
 		writeErr(w, http.StatusBadRequest, proto.ErrorCodeBadDevice, "未知设备: "+req.DeviceID)
 		return
 	}
+	if tgt.url != "" {
+		a.uploadDirect(w, r, tgt, req.Path, req.Mode, raw)
+		return
+	}
+	a.uploadRelay(w, r, tgt, req.Path, req.Mode, raw)
+}
+
+// uploadDirect 直连上传：独立连接，分片发送。
+func (a *serveAPI) uploadDirect(w http.ResponseWriter, r *http.Request, tgt deviceTarget, path string, mode uint32, raw []byte) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+	conn, err := dialDirect(ctx, tgt.url)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, proto.ErrorCodeConnLost, "连接设备失败: "+err.Error())
+		return
+	}
+	defer conn.Close()
+
+	id := idutil.New()
+	begin, _ := proto.WithPayload(proto.Msg{Type: proto.TypeFilePut, ID: id, Token: tgt.token},
+		proto.FilePutPayload{Path: path, Mode: mode, Size: int64(len(raw))})
+	if err := conn.WriteJSON(begin); err != nil {
+		writeErr(w, http.StatusBadGateway, proto.ErrorCodeConnLost, err.Error())
+		return
+	}
+	for off := 0; off < len(raw); off += serveChunkSize {
+		end := off + serveChunkSize
+		if end > len(raw) {
+			end = len(raw)
+		}
+		chunk, _ := proto.WithPayload(proto.Msg{Type: proto.TypeFilePutChunk, ID: id},
+			proto.FileChunkPayload{Seq: off / serveChunkSize,
+				Data: base64.StdEncoding.EncodeToString(raw[off:end]), Done: end == len(raw)})
+		if err := conn.WriteJSON(chunk); err != nil {
+			writeErr(w, http.StatusBadGateway, proto.ErrorCodeConnLost, "发送分片失败: "+err.Error())
+			return
+		}
+	}
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, proto.ErrorCodeConnLost, "等待回执失败: "+err.Error())
+			return
+		}
+		var m proto.Msg
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		switch m.Type {
+		case proto.TypeFilePutAck:
+			var p proto.FilePutAckPayload
+			m.PayloadOf(&p)
+			if !p.OK {
+				writeErr(w, http.StatusBadGateway, "", p.Error)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path, "size": len(raw)})
+			return
+		case proto.TypeError:
+			var p proto.ErrorPayload
+			m.PayloadOf(&p)
+			writeErr(w, http.StatusBadGateway, p.Code, p.Error)
+			return
+		}
+	}
+}
+
+// uploadRelay 中继上传（复用常驻连接）。
+func (a *serveAPI) uploadRelay(w http.ResponseWriter, r *http.Request, tgt deviceTarget, path string, mode uint32, raw []byte) {
 	id := idutil.New()
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 
-	begin, _ := proto.WithPayload(proto.Msg{Type: proto.TypeFilePut, ID: id, Token: token},
-		proto.FilePutPayload{Path: req.Path, Mode: req.Mode, Size: int64(len(raw))})
+	begin, _ := proto.WithPayload(proto.Msg{Type: proto.TypeFilePut, ID: id, Token: tgt.token},
+		proto.FilePutPayload{Path: path, Mode: mode, Size: int64(len(raw))})
 	ch, dead, err := a.hub.request(ctx, begin)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, proto.ErrorCodeConnLost, err.Error())
@@ -518,7 +759,7 @@ func (a *serveAPI) handleUpload(w http.ResponseWriter, r *http.Request) {
 					writeErr(w, http.StatusBadGateway, "", p.Error)
 					return
 				}
-				writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": req.Path, "size": len(raw)})
+				writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path, "size": len(raw)})
 				return
 			case proto.TypeError:
 				var p proto.ErrorPayload
@@ -544,17 +785,91 @@ func (a *serveAPI) handleDownload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, proto.ErrorCodeBadPayload, "device_id 与 path 必填")
 		return
 	}
-	token, ok := a.devices[req.DeviceID]
+	tgt, ok := a.devices[req.DeviceID]
 	if !ok {
 		writeErr(w, http.StatusBadRequest, proto.ErrorCodeBadDevice, "未知设备: "+req.DeviceID)
 		return
 	}
+	if tgt.url != "" {
+		a.downloadDirect(w, r, tgt, req.Path)
+		return
+	}
+	a.downloadRelay(w, r, tgt, req.Path)
+}
+
+// downloadDirect 直连下载：独立连接收集分片。
+func (a *serveAPI) downloadDirect(w http.ResponseWriter, r *http.Request, tgt deviceTarget, path string) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+	conn, err := dialDirect(ctx, tgt.url)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, proto.ErrorCodeConnLost, "连接设备失败: "+err.Error())
+		return
+	}
+	defer conn.Close()
+
+	id := idutil.New()
+	get, _ := proto.WithPayload(proto.Msg{Type: proto.TypeFileGet, ID: id, Token: tgt.token},
+		proto.FileGetPayload{Path: path})
+	if err := conn.WriteJSON(get); err != nil {
+		writeErr(w, http.StatusBadGateway, proto.ErrorCodeConnLost, err.Error())
+		return
+	}
+	var raw []byte
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, proto.ErrorCodeConnLost, "接收分片失败: "+err.Error())
+			return
+		}
+		var m proto.Msg
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		switch m.Type {
+		case proto.TypeFileGetChunk:
+			var p proto.FileGetChunkPayload
+			m.PayloadOf(&p)
+			if p.Data != "" {
+				b, err := base64.StdEncoding.DecodeString(p.Data)
+				if err != nil {
+					writeErr(w, http.StatusBadGateway, proto.ErrorCodeInternal, "分片解码失败")
+					return
+				}
+				raw = append(raw, b...)
+				if len(raw) > 256<<20 {
+					writeErr(w, http.StatusBadGateway, proto.ErrorCodeInternal, "文件过大（上限 256MB）")
+					return
+				}
+			}
+			if p.Done {
+				if p.Error != "" {
+					writeErr(w, http.StatusNotFound, p.ErrorCode, p.Error)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{
+					"ok": true, "path": path, "size": len(raw),
+					"data": base64.StdEncoding.EncodeToString(raw),
+				})
+				return
+			}
+		case proto.TypeError:
+			var p proto.ErrorPayload
+			m.PayloadOf(&p)
+			writeErr(w, http.StatusBadGateway, p.Code, p.Error)
+			return
+		}
+	}
+}
+
+// downloadRelay 中继下载（复用常驻连接）。
+func (a *serveAPI) downloadRelay(w http.ResponseWriter, r *http.Request, tgt deviceTarget, path string) {
 	id := idutil.New()
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 
-	get, _ := proto.WithPayload(proto.Msg{Type: proto.TypeFileGet, ID: id, Token: token},
-		proto.FileGetPayload{Path: req.Path})
+	get, _ := proto.WithPayload(proto.Msg{Type: proto.TypeFileGet, ID: id, Token: tgt.token},
+		proto.FileGetPayload{Path: path})
 	ch, dead, err := a.hub.request(ctx, get)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, proto.ErrorCodeConnLost, err.Error())
@@ -594,7 +909,7 @@ func (a *serveAPI) handleDownload(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					writeJSON(w, http.StatusOK, map[string]any{
-						"ok": true, "path": req.Path, "size": len(raw),
+						"ok": true, "path": path, "size": len(raw),
 						"data": base64.StdEncoding.EncodeToString(raw),
 					})
 					return

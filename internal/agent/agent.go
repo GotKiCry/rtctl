@@ -66,6 +66,7 @@ type filePutState struct {
 	mode    uint32
 	size    int64
 	written int64
+	sink    sendSink // 回执目标
 }
 
 // New 创建 Agent。
@@ -175,7 +176,7 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 			}
 			continue
 		}
-		a.handleMsg(ctx, m)
+		a.handleMsg(ctx, m, a)
 	}
 }
 
@@ -277,26 +278,52 @@ func (a *Agent) cleanup() {
 	}
 }
 
+// sendSink 响应目标抽象：中继模式下为 agent 全局发送队列，
+// 直连（standalone）模式下为对应客户端的连接队列。
+type sendSink interface {
+	Send(proto.Msg) error
+	SendBlocking(proto.Msg, time.Duration) error
+	CloseConn() // 关键帧送达失败时断开对应连接
+}
+
+// Send 实现 sendSink（中继模式：写入全局队列）。
+func (a *Agent) Send(m proto.Msg) error { return a.sendMsg(m) }
+
+// SendBlocking 实现 sendSink（中继模式）。
+func (a *Agent) SendBlocking(m proto.Msg, timeout time.Duration) error {
+	return a.sendMsgBlocking(m, timeout)
+}
+
+// CloseConn 实现 sendSink（中继模式：断开与服务器的连接）。
+func (a *Agent) CloseConn() {
+	a.mu.Lock()
+	ws := a.ws
+	a.mu.Unlock()
+	if ws != nil {
+		ws.Close()
+	}
+}
+
 // ---- 消息分发 ----
 
-func (a *Agent) handleMsg(ctx context.Context, m proto.Msg) {
+func (a *Agent) handleMsg(ctx context.Context, m proto.Msg, sink sendSink) {
 	switch m.Type {
 	case proto.TypeExec:
-		go a.handleExec(m)
+		go a.handleExec(m, sink)
 	case proto.TypeExecKill:
 		a.handleExecKill(m)
 	case proto.TypeShellOpen:
 		// 同步创建并注册会话，避免 shell_data 早于注册被丢弃
-		a.handleShellOpen(m)
+		a.handleShellOpen(m, sink)
 	case proto.TypeShellData, proto.TypeShellResize, proto.TypeShellClose:
 		a.handleShellCtrl(m)
 	case proto.TypeFilePut:
 		// 同步创建临时文件并注册状态，避免后续分片早于注册到达被丢弃
-		a.handleFilePut(m)
+		a.handleFilePut(m, sink)
 	case proto.TypeFilePutChunk:
 		a.handleFilePutChunk(m)
 	case proto.TypeFileGet:
-		go a.handleFileGet(m)
+		go a.handleFileGet(m, sink)
 	case proto.TypeFileAbort:
 		a.handleFileAbort(m)
 	case proto.TypeRegisterAck:
@@ -308,19 +335,19 @@ func (a *Agent) handleMsg(ctx context.Context, m proto.Msg) {
 
 // ---- exec 一次性执行 ----
 
-func (a *Agent) handleExec(m proto.Msg) {
+func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 	// 并发上限：超限直接回错误，不排队（Agent 侧应串行化自己的负载）
 	select {
 	case a.execSem <- struct{}{}:
 		defer func() { <-a.execSem }()
 	default:
-		a.sendExecOutput(m.ID, "", true, 1, "并发 exec 超限", proto.ErrorCodeOverload, false)
+		sendExecOutput(sink, m.ID, "", true, 1, "并发 exec 超限", proto.ErrorCodeOverload, false)
 		return
 	}
 
 	var p proto.ExecPayload
 	if err := m.PayloadOf(&p); err != nil || p.Cmd == "" {
-		a.sendExecOutput(m.ID, "", true, 1, "exec payload 无效", proto.ErrorCodeBadPayload, false)
+		sendExecOutput(sink, m.ID, "", true, 1, "exec payload 无效", proto.ErrorCodeBadPayload, false)
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -350,7 +377,7 @@ func (a *Agent) handleExec(m proto.Msg) {
 	}
 	pr, pw, perr := os.Pipe()
 	if perr != nil {
-		a.sendExecOutput(m.ID, "", true, 1, "创建管道失败: "+perr.Error(), proto.ErrorCodeStartFailed, false)
+		sendExecOutput(sink, m.ID, "", true, 1, "创建管道失败: "+perr.Error(), proto.ErrorCodeStartFailed, false)
 		return
 	}
 	cmd.Stdout = pw
@@ -358,7 +385,7 @@ func (a *Agent) handleExec(m proto.Msg) {
 	if err := cmd.Start(); err != nil {
 		pw.Close()
 		pr.Close()
-		a.sendExecOutput(m.ID, "", true, 1, "启动进程失败: "+err.Error(), proto.ErrorCodeStartFailed, false)
+		sendExecOutput(sink, m.ID, "", true, 1, "启动进程失败: "+err.Error(), proto.ErrorCodeStartFailed, false)
 		return
 	}
 	// 超时/取消时终止整个进程树（孙进程也要杀）
@@ -385,7 +412,7 @@ func (a *Agent) handleExec(m proto.Msg) {
 			if runtime.GOOS == "windows" {
 				data = decodeConsoleOutput(data)
 			}
-			if err := a.sendExecOutput(m.ID, string(data), false, 0, "", "", false); err != nil {
+			if err := sendExecOutput(sink, m.ID, string(data), false, 0, "", "", false); err != nil {
 				truncated = true // 背压丢帧：在 done 帧上打截断标记
 			}
 			seq++
@@ -419,28 +446,23 @@ func (a *Agent) handleExec(m proto.Msg) {
 	case ctx.Err() == context.Canceled:
 		errStr, errCode = "已被取消", proto.ErrorCodeKilled
 	}
-	// done 帧必须可靠送达：阻塞发送，失败则关闭连接
-	if err := a.sendExecOutputBlocking(m.ID, true, exitCode, errStr, errCode, truncated); err != nil {
-		a.mu.Lock()
-		ws := a.ws
-		a.mu.Unlock()
-		if ws != nil {
-			ws.Close()
-		}
+	// done 帧必须可靠送达：阻塞发送，失败则断开对应连接
+	if err := sendExecOutputBlocking(sink, m.ID, true, exitCode, errStr, errCode, truncated); err != nil {
+		sink.CloseConn()
 	}
 	log.Printf("[agent] exec 结束: %s exit=%d %s", p.Cmd, exitCode, errStr)
 }
 
-func (a *Agent) sendExecOutput(id, data string, done bool, exitCode int, errStr, errCode string, truncated bool) error {
+func sendExecOutput(sink sendSink, id, data string, done bool, exitCode int, errStr, errCode string, truncated bool) error {
 	out, _ := proto.WithPayload(proto.Msg{Type: proto.TypeExecOutput, ID: id},
 		proto.ExecOutputPayload{Data: data, Done: done, ExitCode: exitCode, Error: errStr, ErrorCode: errCode, Truncated: truncated})
-	return a.sendMsg(out)
+	return sink.Send(out)
 }
 
-func (a *Agent) sendExecOutputBlocking(id string, done bool, exitCode int, errStr, errCode string, truncated bool) error {
+func sendExecOutputBlocking(sink sendSink, id string, done bool, exitCode int, errStr, errCode string, truncated bool) error {
 	out, _ := proto.WithPayload(proto.Msg{Type: proto.TypeExecOutput, ID: id},
 		proto.ExecOutputPayload{Done: done, ExitCode: exitCode, Error: errStr, ErrorCode: errCode, Truncated: truncated})
-	return a.sendMsgBlocking(out, 5*time.Second)
+	return sink.SendBlocking(out, 5*time.Second)
 }
 
 func (a *Agent) handleExecKill(m proto.Msg) {
@@ -460,20 +482,20 @@ func (a *Agent) handleExecKill(m proto.Msg) {
 
 // handleFilePut 开始一次上传：校验大小、创建临时文件并注册状态。
 // 分片由 handleFilePutChunk（读循环内串行）处理，最后一片 done=true 落盘。
-func (a *Agent) handleFilePut(m proto.Msg) {
+func (a *Agent) handleFilePut(m proto.Msg, sink sendSink) {
 	var p proto.FilePutPayload
 	if err := m.PayloadOf(&p); err != nil || p.Path == "" {
-		a.sendFilePutAck(m.ID, false, "file_put payload 无效")
+		sendFilePutAck(sink, m.ID, false, "file_put payload 无效")
 		return
 	}
 	if p.Size <= 0 || p.Size > maxFileSize {
-		a.sendFilePutAck(m.ID, false, fmt.Sprintf("文件大小无效（上限 %dMB）", maxFileSize>>20))
+		sendFilePutAck(sink, m.ID, false, fmt.Sprintf("文件大小无效（上限 %dMB）", maxFileSize>>20))
 		return
 	}
 	a.mu.Lock()
 	if len(a.putFiles) >= maxConcurrentPut {
 		a.mu.Unlock()
-		a.sendFilePutAck(m.ID, false, "并发上传超限")
+		sendFilePutAck(sink, m.ID, false, "并发上传超限")
 		return
 	}
 	a.mu.Unlock()
@@ -485,10 +507,10 @@ func (a *Agent) handleFilePut(m proto.Msg) {
 	tmpPath := p.Path + ".rtctl-partial"
 	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
-		a.sendFilePutAck(m.ID, false, "创建临时文件失败: "+err.Error())
+		sendFilePutAck(sink, m.ID, false, "创建临时文件失败: "+err.Error())
 		return
 	}
-	st := &filePutState{file: f, tmpPath: tmpPath, path: p.Path, mode: mode, size: p.Size}
+	st := &filePutState{file: f, tmpPath: tmpPath, path: p.Path, mode: mode, size: p.Size, sink: sink}
 	a.mu.Lock()
 	a.putFiles[m.ID] = st
 	a.mu.Unlock()
@@ -536,11 +558,11 @@ func (a *Agent) handleFilePutChunk(m proto.Msg) {
 	if err := os.Rename(st.tmpPath, st.path); err != nil {
 		os.Remove(st.tmpPath)
 		a.removeFilePut(m.ID)
-		a.sendFilePutAck(m.ID, false, "落盘改名失败: "+err.Error())
+		sendFilePutAck(st.sink, m.ID, false, "落盘改名失败: "+err.Error())
 		return
 	}
 	a.removeFilePut(m.ID)
-	a.sendFilePutAck(m.ID, true, "")
+	sendFilePutAck(st.sink, m.ID, true, "")
 	log.Printf("[agent] file_put 完成: %s (%d 字节)", st.path, st.written)
 }
 
@@ -550,7 +572,7 @@ func (a *Agent) failFilePut(id string, st *filePutState, why string) {
 	}
 	os.Remove(st.tmpPath)
 	a.removeFilePut(id)
-	a.sendFilePutAck(id, false, why)
+	sendFilePutAck(st.sink, id, false, why)
 	log.Printf("[agent] file_put 失败: %s (%s)", st.path, why)
 }
 
@@ -560,24 +582,24 @@ func (a *Agent) removeFilePut(id string) {
 	a.mu.Unlock()
 }
 
-func (a *Agent) sendFilePutAck(id string, ok bool, errStr string) {
+func sendFilePutAck(sink sendSink, id string, ok bool, errStr string) {
 	ack, _ := proto.WithPayload(proto.Msg{Type: proto.TypeFilePutAck, ID: id},
 		proto.FilePutAckPayload{OK: ok, Error: errStr})
-	a.sendMsg(ack)
+	sink.Send(ack)
 }
 
 // handleFileGet 下载文件：分片流式回传；文件数据必须可靠送达（阻塞发送）。
-func (a *Agent) handleFileGet(m proto.Msg) {
+func (a *Agent) handleFileGet(m proto.Msg, sink sendSink) {
 	select {
 	case a.getSem <- struct{}{}:
 		defer func() { <-a.getSem }()
 	default:
-		a.sendFileGetChunk(m.ID, 0, "", true, "并发下载超限", "")
+		sendFileGetChunk(sink, m.ID, 0, "", true, "并发下载超限", "")
 		return
 	}
 	var p proto.FileGetPayload
 	if err := m.PayloadOf(&p); err != nil || p.Path == "" {
-		a.sendFileGetChunk(m.ID, 0, "", true, "file_get payload 无效", "")
+		sendFileGetChunk(sink, m.ID, 0, "", true, "file_get payload 无效", "")
 		return
 	}
 	f, err := os.Open(p.Path)
@@ -588,7 +610,7 @@ func (a *Agent) handleFileGet(m proto.Msg) {
 			msg = "文件不存在: " + p.Path
 			code = proto.ErrorCodeNotFound
 		}
-		a.sendFileGetChunk(m.ID, 0, "", true, msg, code)
+		sendFileGetChunk(sink, m.ID, 0, "", true, msg, code)
 		return
 	}
 	defer f.Close()
@@ -600,34 +622,29 @@ func (a *Agent) handleFileGet(m proto.Msg) {
 		if n > 0 {
 			total += n
 			if total > maxFileSize {
-				a.sendFileGetChunk(m.ID, seq, "", true, fmt.Sprintf("文件过大（上限 %dMB）", maxFileSize>>20), "")
+				sendFileGetChunk(sink, m.ID, seq, "", true, fmt.Sprintf("文件过大（上限 %dMB）", maxFileSize>>20), "")
 				return
 			}
-			a.sendFileGetChunk(m.ID, seq, base64.StdEncoding.EncodeToString(buf[:n]), false, "", "")
+			sendFileGetChunk(sink, m.ID, seq, base64.StdEncoding.EncodeToString(buf[:n]), false, "", "")
 			seq++
 		}
 		if rerr == io.EOF {
-			a.sendFileGetChunk(m.ID, seq, "", true, "", "")
+			sendFileGetChunk(sink, m.ID, seq, "", true, "", "")
 			log.Printf("[agent] file_get 完成: %s (%d 字节)", p.Path, total)
 			return
 		}
 		if rerr != nil {
-			a.sendFileGetChunk(m.ID, seq, "", true, "读取失败: "+rerr.Error(), "")
+			sendFileGetChunk(sink, m.ID, seq, "", true, "读取失败: "+rerr.Error(), "")
 			return
 		}
 	}
 }
 
-func (a *Agent) sendFileGetChunk(id string, seq int, data string, done bool, errStr, errCode string) {
+func sendFileGetChunk(sink sendSink, id string, seq int, data string, done bool, errStr, errCode string) {
 	out, _ := proto.WithPayload(proto.Msg{Type: proto.TypeFileGetChunk, ID: id},
 		proto.FileGetChunkPayload{Seq: seq, Data: data, Done: done, Error: errStr, ErrorCode: errCode})
-	if err := a.sendMsgBlocking(out, 10*time.Second); err != nil {
-		a.mu.Lock()
-		ws := a.ws
-		a.mu.Unlock()
-		if ws != nil {
-			ws.Close()
-		}
+	if err := sink.SendBlocking(out, 10*time.Second); err != nil {
+		sink.CloseConn()
 	}
 }
 
@@ -654,21 +671,21 @@ type shellHandle struct {
 }
 
 // handleShellOpen 同步创建并注册会话（在读循环线程内），随后起 goroutine 泵输出。
-func (a *Agent) handleShellOpen(m proto.Msg) {
+func (a *Agent) handleShellOpen(m proto.Msg, sink sendSink) {
 	select {
 	case a.shellSem <- struct{}{}:
 		defer func() { <-a.shellSem }()
 	default:
 		ack, _ := proto.WithPayload(proto.Msg{Type: proto.TypeShellAck, SessionID: m.SessionID},
 			proto.ShellAckPayload{OK: false, Error: "并发 shell 超限"})
-		a.sendMsg(ack)
+		sink.Send(ack)
 		return
 	}
 	sess, err := newShellSession()
 	if err != nil {
 		ack, _ := proto.WithPayload(proto.Msg{Type: proto.TypeShellAck, SessionID: m.SessionID},
 			proto.ShellAckPayload{OK: false, Error: err.Error()})
-		a.sendMsg(ack)
+		sink.Send(ack)
 		return
 	}
 	sh := &shellHandle{sess: sess}
@@ -678,7 +695,7 @@ func (a *Agent) handleShellOpen(m proto.Msg) {
 
 	ack, _ := proto.WithPayload(proto.Msg{Type: proto.TypeShellAck, SessionID: m.SessionID},
 		proto.ShellAckPayload{OK: true})
-	a.sendMsg(ack)
+	sink.Send(ack)
 	log.Printf("[agent] shell 打开: 会话=%s", m.SessionID)
 
 	// 进程输出 -> 上行消息
@@ -693,7 +710,7 @@ func (a *Agent) handleShellOpen(m proto.Msg) {
 				}
 				d, _ := proto.WithPayload(proto.Msg{Type: proto.TypeShellData, SessionID: m.SessionID},
 					proto.ShellDataPayload{Data: string(data)})
-				a.sendMsg(d)
+				sink.Send(d)
 			}
 			if rerr != nil {
 				break
@@ -710,7 +727,7 @@ func (a *Agent) handleShellOpen(m proto.Msg) {
 		}
 		a.mu.Unlock()
 		if ok {
-			a.sendMsg(proto.Msg{Type: proto.TypeShellClose, SessionID: m.SessionID})
+			sink.Send(proto.Msg{Type: proto.TypeShellClose, SessionID: m.SessionID})
 		}
 	}()
 }

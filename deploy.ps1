@@ -138,17 +138,29 @@ if ($Mode -eq 'Server') {
 # ---------- ② Agent ----------
 
 if ($Mode -eq 'Agent') {
-    if (-not $ServerUrl -or -not $Id -or -not $Token) { throw "-ServerUrl / -Id / -Token 必填" }
+    if (-not $Id -or -not $Token) { throw "-Id / -Token 必填" }
+    $hasListen = $PSBoundParameters.ContainsKey('Listen')
+    if (-not $ServerUrl -and -not $hasListen) { throw "-ServerUrl（中继模式）与 -Listen（直连模式）必须二选一" }
     $singleId = @($Id)[0]
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     $bin = Get-Bin 'agent.exe'
     Copy-Item $bin (Join-Path $InstallDir 'agent.exe') -Force
-    Install-Task 'rtctl-agent' (Join-Path $InstallDir 'agent.exe') `
-        "-server `"$ServerUrl`" -id `"$singleId`"" `
-        "rtctl agent for device $singleId" 'RTCTL_TOKEN' $Token
+    if ($hasListen) {
+        Install-Task 'rtctl-agent' (Join-Path $InstallDir 'agent.exe') `
+            "-listen `"$Listen`" -id `"$singleId`"" `
+            "rtctl agent (standalone, device $singleId)" 'RTCTL_TOKEN' $Token
+        $port = $Listen -replace '.*:', ''
+        Write-Host "[rtctl] ✔ agent ($singleId) 直连模式已安装并启动：监听 $Listen（无需中继）"
+        Write-Host "[rtctl]   防火墙放行: netsh advfirewall firewall add rule name=rtctl-agent dir=in action=allow protocol=TCP localport=$port"
+        Write-Host "[rtctl]   验证: client.exe -server ws://<本机IP>:$port/ws exec -token $Token 'echo ok'"
+    } else {
+        Install-Task 'rtctl-agent' (Join-Path $InstallDir 'agent.exe') `
+            "-server `"$ServerUrl`" -id `"$singleId`"" `
+            "rtctl agent for device $singleId" 'RTCTL_TOKEN' $Token
+        Write-Host "[rtctl] ✔ agent ($singleId) 已安装并启动（SYSTEM 账户，开机自启）"
+        Write-Host "[rtctl]   验证: 操作机 client list 应看到设备在线"
+    }
     Start-Sleep -Seconds 2
-    Write-Host "[rtctl] ✔ agent ($singleId) 已安装并启动（SYSTEM 账户，开机自启）"
-    Write-Host "[rtctl]   验证: 操作机 client list 应看到设备在线"
     Write-Host "[rtctl]   卸载: schtasks /Delete /TN rtctl-agent /F"
 }
 

@@ -5,23 +5,29 @@ description: Build, run, test, and extend the rtctl remote terminal control syst
 
 # rtctl — 远程终端控制系统
 
-rtctl 是一个 Go 实现的远程终端控制系统：**server**（中继）+ **agent**（被控端，主动拨出，可穿透 NAT）+ **client**（控制端 CLI，含 `serve` 子命令——常驻 HTTP 服务供 AI Agent 直控）。
+rtctl 是一个 Go 实现的远程终端控制系统：**agent**（被控端，双模式）+ **client**（控制端 CLI，含 `serve` 子命令——常驻 HTTP 服务供 AI Agent 直控）+ **server**（中继，仅 NAT 场景可选）。
+agent 直连模式（`-listen`）自带 WS 服务端，目标机可访问时**全程无中继**；拨出模式（默认）连中继穿透 NAT。
 执行模型：`exec` 一次性命令（完成帧 + 退出码）、`shell` 交互终端（Linux 真 PTY / Windows cmd 管道）、`file-put/file-get` 分片文件传输。设备以 token 寻址：持有设备 token 即拥有该设备 shell 权限。
 
 ## 目录与分层
 
 ```
 rtctl/
-├── cmd/server        # HTTP(S)/WebSocket 入口，flag 解析
-├── cmd/agent         # 被控端入口
+├── cmd/server        # 中继入口（可选组件，仅 NAT 场景）
+├── cmd/agent         # 被控端入口（-listen 直连 / 默认拨出）
 ├── cmd/client        # CLI：main.go(list/exec/shell) + file.go(文件传输) + serve.go(clientd HTTP 服务)
 ├── deploy.sh/.ps1    # 一键部署唯一入口（server/agent/client/clientd/update 五模式）
 └── internal/
     ├── proto         # 消息外壳 + 各 payload + 错误码常量（协议唯一定义处）
-    ├── server        # hub(路由/在途绑定) conn(读写泵/背压) server(Origin) audit
-    ├── agent         # 连接生命周期 + exec/shell/file 执行器（linux/windows 分文件）
+    ├── server        # 中继：hub(路由/在途绑定) conn(读写泵/背压) server(Origin) audit
+    ├── agent         # 连接生命周期 + exec/shell/file 执行器 + standalone.go(直连服务端)
     └── idutil        # 消息/会话/传输 ID
 ```
+
+关键架构点：
+- **sendSink 抽象**（`internal/agent`）：处理函数（exec/shell/file）的响应目标可插拔——中继模式 = agent 全局队列，直连模式 = 对应客户端连接队列。改动任何"发响应"的代码都要走 sink，不能直接 `a.sendMsg`。
+- **standalone 模式**（`agent -listen`，`standalone.go`）：实现与中继相同的 client 侧协议；token 只校验**发起类消息**（exec/exec_kill/shell_open/file_put/file_get/file_abort），分片/流消息不带 token 按 ID/会话绑定——与中继路由语义一致。
+- **clientd 双通道**（`cmd/client/serve.go`）：设备清单条目带 `url` 直连（每请求独立连接），不带 `url` 经中继（常驻连接多路复用）。
 
 平台拆分约定（`//go:build` 标签）：`shell_linux.go` / `shell_windows.go`（shell 会话实现）、`shell_exec_linux.go` / `shell_exec_windows.go`（exec argv 与进程树终止）。改执行逻辑时必须同时看两个平台文件。
 
@@ -56,6 +62,7 @@ rtctl/
    - **截断标记**：慢速消费者 + 大输出时，done 帧必须带 `truncated=true` 且可靠送达（可用 2ms/帧 的慢读 harness 模拟）。
    - **文件传输**：`file-put`/`file-get` 往返后哈希一致（用 >256KB 随机文件覆盖分片路径）；覆盖同名文件生效；不存在文件回 `not_found`。
    - **clientd**：`client serve -listen 127.0.0.1:18080 -devices devices.json -api-key test` 起服务后：`/healthz` 免认证 ok；无 key 401；`/api/v1/devices`、`/api/v1/exec`（退出码/超时）、`/api/v1/files/upload|download`（哈希一致）；并发 5 exec + 2 上传；杀中继 → 在途请求回 `connection_lost`、重启中继后 ~2s 自动恢复。
+   - **直连模式**：`agent -listen 127.0.0.1:18443 -id X -token T`（不起 server）后：CLI `-server ws://127.0.0.1:18443/ws` 的 list/exec/shell/file 全通过；错 token 回 `bad_token`；clientd 设备清单带 `"url":"ws://127.0.0.1:18443/ws"` 时 HTTP 全套直连可用（含 1MB 文件哈希一致）。
 5. 收尾：`Stop-Process` 所有测试进程，删除 `smoke/` 测试产物（注意：本会话的 write 工具对已删除路径有缓存问题，重建文件请先用 `New-Item` 建目录或改用 pwsh `Set-Content`）。
 
 ## 协议契约（Machine Client Contract 要点）
@@ -76,6 +83,7 @@ rtctl/
 - **agent 重连竞态**：每轮连接的 ws/发送队列必须是该轮局部资源（`a.mu` 保护交换，writePump 接收局部参数），旧连接的 goroutine 不得触碰新连接。
 - **shell 注册竞态**：`handleShellOpen` 必须同步注册会话（不能放 goroutine 里），否则紧跟的 shell_data 会被静默丢弃。
 - **file_put 注册竞态（实测踩过）**：`handleFilePut` 同样必须同步建临时文件并注册 `putFiles` 状态（不能在 goroutine 里），否则紧跟的分片查不到状态被静默丢弃、客户端永久等待 ack。凡"首消息建立状态 + 后续消息引用状态"的模式，建立必须同步。
+- **直连模式 token 校验边界（实测踩过）**：分片/流消息（file_put_chunk、shell_data/resize/close）不带 token，standalone 服务端如果对它们也查 token 会误拒（client 侧表现为 bad_token 报错）。只对发起类消息查 token。
 - **文件数据不可静默丢弃**：exec 输出可以丢帧+打 truncated 标记，但文件分片丢失 = 文件损坏，必须走阻塞发送（agent/server 两端）。
 - **Windows rename 语义**：`os.Rename` 不覆盖已存在目标，覆盖前先 `os.Remove`（仅 Windows）。
 - **Windows 输出编码**：中文系统 cmd 输出是 GBK；agent 侧有启发式转码（UTF-8 有效则原样，否则 GBK 解码），分片边界切开多字节字符时该片回退原样——接受该不完美性。

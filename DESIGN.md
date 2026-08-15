@@ -14,19 +14,27 @@
 
 ## 2. 架构
 
+**默认（直连，无中继）**：目标机可访问时，agent 自带 WS 监听，clientd/client 直连：
+
 ```
-+-------------+   HTTP    +----------+   wss://   +----------+   wss://   +--------------+
-|  AI Agent   | --------> | clientd  | ---------> |  server  | <--------- |    agent     |
-| (任何程序)  |  JSON API | (client   |  JSON消息  | (中继/路由)|  JSON消息  |  (目标设备)   |
-+-------------+           |  serve)  |            +----------+            +--------------+
++-------------+   HTTP    +----------+   直连 wss    +-------------------+
+|  AI Agent   | --------> | clientd  | ------------> | agent (-listen)   |
+| (任何程序)  |  JSON API | (client   |   JSON消息    | (目标设备, 自带监听) |
++-------------+           |  serve)  |               +-------------------+
                           +----------+
                               |  CLI 子命令: list / exec / shell / file-put / file-get
 ```
 
-- **clientd**（`client serve`）是操作机上的常驻 HTTP 服务：Agent 通过 REST API 直控设备，token 只存在于 clientd 本地设备清单，Agent 不接触凭据、不手动传输文件。
-- **agent 主动拨出**连接服务器（而非服务器连目标机），因此目标机可以位于 NAT / 防火墙之后，无需公网 IP。
-- server 与 agent 之间、server 与 client 之间均为 WebSocket 长连接，双向 JSON 消息。
-- 服务器**不存储指令内容语义**，只做路由与审计，是纯转发层。
+**NAT 场景（可选）**：目标机不可直连时经中继（agent 主动拨出，穿透 NAT）：
+
+```
+AI Agent ──HTTP──→ clientd ──wss──→ server(中继) ←──wss── agent(拨出模式)
+```
+
+- **clientd**（`client serve`）是操作机上的常驻 HTTP 服务：Agent 通过 REST API 直控设备，token 只存在于 clientd 本地设备清单（`{devices:[{id,token,url?}]}`），Agent 不接触凭据、不手动传输文件。
+- **agent 双模式**：`-listen` 直连模式（自带 WS 服务端，实现与中继相同的 client 侧协议：auth/list/exec/shell/file，按设备 token 校验每条发起指令）；默认拨出模式连中继。
+- 同一份设备清单可混用：带 `url` 的条目直连，不带 `url` 的条目经中继。
+- server（中继）不存储指令内容语义，只做路由与审计。
 
 ## 3. 认证模型（token）
 
@@ -136,12 +144,23 @@ server
 
 ## 5.5 clientd（client serve）
 
-操作机上的常驻 HTTP 服务（与 server 之间是普通 client 连接，含 auth 与断线重连）：
+操作机上的常驻 HTTP 服务（中继设备走常驻连接，直连设备按请求独立连接）：
 
-- **凭据隔离**：本地设备清单（`{devices:[{id,token}]}`，与 server 同格式）提供 device_id -> token 映射；Agent 只使用 device_id，永远不接触 token。
+- **凭据隔离**：本地设备清单（`{devices:[{id,token,url?}]}`）提供 device_id -> token(+url) 映射；Agent 只使用 device_id，永远不接触 token。
+- **双通道**：条目带 `url` 直连 agent（每次请求独立连接，auth + 单次交互）；不带 `url` 经中继（常驻复用连接）。list 对直连设备逐个探活。
 - **API**：`GET /api/v1/devices`、`POST /api/v1/exec`、`POST /api/v1/files/upload|download`，Bearer API 密钥认证（不传自动生成）。
-- **多路复用**：单条 WS 连接上按消息 ID 并发分发多个请求；list_ack 无 ID，串行化处理。
+- **多路复用**：中继连接上按消息 ID 并发分发多个请求；list_ack 无 ID，串行化处理。
 - **生命周期**：请求超时/断开即向 agent 发 exec_kill / file_abort；中继断线给在途请求回 `connection_lost`，指数退避重连后自动恢复。
+
+## 5.6 agent 直连模式（standalone）
+
+`agent -listen :8443` 时 agent 自带 WS 服务端，实现与中继相同的 client 侧协议：
+
+- `/ws` 接受 client/clientd 连接；`/healthz` 健康检查；支持 `-tls-cert/-tls-key`；默认拒绝跨源 Origin。
+- **token 校验**：对发起类消息（exec/exec_kill/shell_open/file_put/file_get/file_abort）逐条校验设备 token；分片/流消息（file_put_chunk/shell_data/resize/close）不带 token，按 ID/会话绑定（与中继语义一致）。
+- **响应定向**：agent 内部处理函数经 sendSink 抽象——中继模式下响应进全局队列，直连模式下进对应客户端连接的队列。
+- **连接断开清理**：直连 client 断开时取消其 exec、关闭其 shell、清理其上传临时文件（与中继模式的 server 侧清理对等）。
+- 直连模式与拨出模式互斥（`-listen` 优先）；直连模式的接入/指令审计由 agent 日志承担。
 
 ## 6. Agent 实现要点
 

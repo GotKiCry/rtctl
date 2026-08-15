@@ -165,17 +165,24 @@ EOF
 # ---------- ② agent ----------
 
 cmd_agent() {
-  local server_url="" id="" token="" run_user="rtctl-agent"
+  local server_url="" id="" token="" run_user="rtctl-agent" listen="" tls_cert="" tls_key=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --server-url) server_url="$2"; shift 2 ;;
+      --listen)     listen="$2"; shift 2 ;;
+      --tls-cert)   tls_cert="$2"; shift 2 ;;
+      --tls-key)    tls_key="$2"; shift 2 ;;
       --id)         id="$2"; shift 2 ;;
       --token)      token="$2"; shift 2 ;;
       --user)       run_user="$2"; shift 2 ;;
       *) fail "未知参数: $1" ;;
     esac
   done
-  [[ -n "$server_url" && -n "$id" && -n "$token" ]] || fail "--server-url / --id / --token 必填"
+  [[ -n "$id" && -n "$token" ]] || fail "--id 与 --token 必填"
+  { [[ -n "$server_url" && -z "$listen" ]] || [[ -z "$server_url" && -n "$listen" ]]; } \
+    || fail "中继模式 --server-url 与直连模式 --listen 必须二选一"
+  { [[ -n "$tls_cert" && -n "$tls_key" ]] || [[ -z "$tls_cert" && -z "$tls_key" ]]; } \
+    || fail "--tls-cert 与 --tls-key 必须同时提供"
   [[ $EUID -eq 0 ]] || fail "agent 安装需要 root（sudo bash deploy.sh agent ...）"
 
   local bin
@@ -184,6 +191,15 @@ cmd_agent() {
   mkdir -p /etc/rtctl
   install -m 755 "$bin" /usr/local/bin/rtctl-agent
   echo "$token" > /etc/rtctl/agent.token && chmod 600 /etc/rtctl/agent.token
+
+  local exec_args
+  if [[ -n "$listen" ]]; then
+    exec_args="-listen \"$listen\""
+    [[ -n "$tls_cert" ]] && exec_args+=" -tls-cert \"$tls_cert\" -tls-key \"$tls_key\""
+    exec_args+=" -id \"$id\""
+  else
+    exec_args="-server \"$server_url\" -id \"$id\""
+  fi
 
   cat > /etc/systemd/system/rtctl-agent.service <<EOF
 [Unit]
@@ -194,7 +210,7 @@ Wants=network-online.target
 [Service]
 User=$run_user
 Environment=RTCTL_TOKEN=$token
-ExecStart=/usr/local/bin/rtctl-agent -server "$server_url" -id "$id"
+ExecStart=/usr/local/bin/rtctl-agent $exec_args
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
@@ -205,11 +221,18 @@ EOF
   systemctl daemon-reload
   systemctl enable --now rtctl-agent
   sleep 2
-  systemctl is-active --quiet rtctl-agent || fail "启动失败（token/id 与中继不匹配会立即退出），journalctl -u rtctl-agent 查看"
+  systemctl is-active --quiet rtctl-agent || fail "启动失败（token/id 不匹配会立即退出），journalctl -u rtctl-agent 查看"
 
-  log "✔ agent ($id) 已安装并启动（低权限用户 $run_user；需系统管理权限请重装时加 --user root）"
-  log "  日志: journalctl -u rtctl-agent -f"
-  log "  验证: 操作机 client list 应看到 $id 在线"
+  if [[ -n "$listen" ]]; then
+    local port="${listen##*:}"
+    log "✔ agent ($id) 直连模式已启动并自启：监听 $listen（无需中继；client/clientd 直连，需持设备 token）"
+    log "  验证: client -server ws://<本机IP>:$port/ws exec -token $token 'uptime'"
+    log "  clientd 直连: 设备清单里加 \"url\": \"ws://<本机IP>:$port/ws\" 即可"
+  else
+    log "✔ agent ($id) 已安装并启动（低权限用户 $run_user；需系统管理权限请重装时加 --user root）"
+    log "  日志: journalctl -u rtctl-agent -f"
+    log "  验证: 操作机 client list 应看到 $id 在线"
+  fi
 }
 
 # ---------- ③ client ----------
@@ -236,8 +259,8 @@ cmd_clientd() {
       *) fail "未知参数: $1" ;;
     esac
   done
-  [[ -n "$server_url" && -n "$devices" && -f "$devices" ]] \
-    || fail "--server-url 与 --devices <设备清单文件> 必填（文件需存在，格式与 server 的 devices.json 相同）"
+  [[ -n "$devices" && -f "$devices" ]] \
+    || fail "--devices <设备清单文件> 必填（文件需存在；条目可带 url 直连、不带 url 经中继）"
   [[ $EUID -eq 0 ]] || fail "需要 root（sudo bash deploy.sh clientd ...）"
 
   local bin
@@ -250,6 +273,8 @@ cmd_clientd() {
   chmod 600 /etc/rtctl/clientd-devices.json
   chown "$run_user" /etc/rtctl/clientd-devices.json
 
+  local relay_args=""
+  [[ -n "$server_url" ]] && relay_args="-server \"$server_url\" -key \"$client_key_val\""
   cat > /etc/systemd/system/rtctl-clientd.service <<EOF
 [Unit]
 Description=rtctl client service (HTTP API for AI agents)
@@ -258,7 +283,7 @@ Wants=network-online.target
 
 [Service]
 User=$run_user
-ExecStart=/usr/local/bin/rtctl-client -server "$server_url" -key "$client_key_val" -client-id clientd serve -listen $listen -devices /etc/rtctl/clientd-devices.json -api-key "$api_key"
+ExecStart=/usr/local/bin/rtctl-client $relay_args -client-id clientd serve -listen $listen -devices /etc/rtctl/clientd-devices.json -api-key "$api_key"
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
@@ -316,13 +341,17 @@ rtctl 一键部署脚本
       在中心机安装中继服务器，自动为每台设备生成高熵 token（保存在 /etc/rtctl/tokens.txt）
 
   bash deploy.sh agent --server-url <wss://中继:端口/ws?role=agent> --id <设备ID> --token <token> [--user root]
-      在被控机安装 agent（默认低权限用户 rtctl-agent；token 经环境变量注入）
+      在被控机安装 agent（中继模式：主动拨出，可穿透 NAT）
+
+  bash deploy.sh agent --listen :8443 --id <设备ID> --token <token> [--tls-cert C --tls-key K]
+      在被控机安装 agent（直连模式：agent 自带监听，无需中继；目标机需可被访问）
 
   bash deploy.sh client
       在操作机取 client 二进制
 
-  bash deploy.sh clientd --server-url <wss://中继:端口/ws?role=client> --client-key K --devices <设备清单> [--listen 127.0.0.1:18080] [--api-key K]
+  bash deploy.sh clientd [--server-url <wss://中继:端口/ws?role=client> --client-key K] --devices <设备清单> [--listen 127.0.0.1:18080] [--api-key K]
       在操作机安装常驻 HTTP 服务（AI Agent 调用入口，免手动复制指令/传输文件）
+      设备清单条目带 url 直连 agent（无需中继）；不带 url 经中继（--server-url 必填）
 
   bash deploy.sh update server|agent|client|clientd
       拉取仓库最新二进制并重启服务
