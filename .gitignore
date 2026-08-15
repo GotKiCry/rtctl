@@ -1,0 +1,9 @@
+# 本地产物
+audit.log
+*.log
+smoke/
+deploy/*.xml
+
+# Go
+*.test
+*.out
