@@ -65,22 +65,25 @@ CLI 也可直连：`./bin/client -server ws://jp服务器IP:8443/ws exec -token 
 
 CLI 同样支持文件传输：`client file-put -token T local.txt /etc/remote.txt`、`client file-get -token T /var/log/app.log ./app.log`
 
-## 一键部署
+## 一条指令安装（二进制向导，推荐）
 
-唯一入口：Linux `deploy.sh` / Windows `deploy.ps1`（自动下载二进制，免编译）：
+下载一个二进制向导，运行即进入交互式安装：**引导选择组件、端口、token（可自动生成或自定义）**，装完立即运行并开机自启：
 
 ```bash
-# ① 每台被控机（直连模式，无需中继；或 --server-url 用中继模式）
-curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.sh -o deploy.sh
-bash deploy.sh agent --listen :8443 --id jp-tokyo-01 --token <自定token>
+# Linux（被控机 / 操作机 / 中心机通用，一条指令）
+curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard-linux-amd64 -o rtctl-wizard
+chmod +x rtctl-wizard && sudo ./rtctl-wizard
 
-# ② 操作机：常驻 HTTP 服务（设备清单带 url 直连）
-bash deploy.sh clientd --devices devices.json
-
-# ③ 升级：bash deploy.sh update agent|clientd
+# 非交互（脚本化）:
+sudo ./rtctl-wizard --component agent --id jp-tokyo-01 --listen :8443 --gen-token
+sudo ./rtctl-wizard --component clientd --devices devices.json --gen-api-key
+./rtctl-wizard --component client      # 仅下载 client
+./rtctl-wizard --component agent --id jp-tokyo-01 --listen :8443 --token X --dry-run  # 只预览不安装
 ```
 
-详见 [deploy/README.md](deploy/README.md)（中继/NAT 场景、Windows 用法、安全基线、自动启动/开机自启说明）。
+向导结尾会打印：验证命令、生成的 token / API 密钥、可复制的 clientd 设备清单片段。
+
+脚本化部署（`deploy.sh` / `deploy.ps1`，含 Windows）仍可用，详见 [deploy/README.md](deploy/README.md)。
 
 ## 安全
 

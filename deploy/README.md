@@ -1,8 +1,27 @@
 # rtctl 一键部署
 
-**只有一个入口**：Linux 用 `deploy.sh`，Windows 用 `deploy.ps1`。脚本会自动下载对应架构的预编译二进制（公开仓库无需任何准备，本地 `bin/` 存在时优先用本地），无需安装 Go。
+**推荐：二进制向导（一条指令，交互式引导）**——Linux 优先：
 
-## 部署（默认：直连，无中继）
+```bash
+# 一条指令：下载向导并运行（引导选组件、端口、token 自动生成或自定义）
+curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard-linux-amd64 -o rtctl-wizard
+chmod +x rtctl-wizard && sudo ./rtctl-wizard
+```
+
+向导覆盖四种组件：**agent 被控端**（直连/中继）、**clientd 控制服务**（AI Agent 入口）、**server 中继**（NAT 场景可选）、**client**（仅下载）。装完立即运行 + 开机自启（systemd），结尾打印验证命令与可复制的 clientd 设备清单片段。
+
+非交互（脚本化）与预览：
+
+```bash
+sudo ./rtctl-wizard --component agent --id jp-tokyo-01 --listen :8443 --gen-token
+sudo ./rtctl-wizard --component server --port 8443 --device-ids jp-tokyo-01,web-01 --gen-token
+sudo ./rtctl-wizard --component clientd --devices devices.json --gen-api-key
+./rtctl-wizard --component agent --id X --listen :8443 --token T --dry-run   # 只预览 systemd unit
+```
+
+**脚本版**（Linux `deploy.sh` / Windows `deploy.ps1`，自动下载二进制）仍可用：
+
+## 部署（脚本版：直连，无中继）
 
 目标服务器可以被访问时（有公网 IP / 同内网），**不需要 server 机**，只有两步：
 
