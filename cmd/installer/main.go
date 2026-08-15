@@ -57,6 +57,10 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "status" {
+		printStatus()
+		return
+	}
 	flag.Parse()
 	log.SetFlags(0)
 
