@@ -56,3 +56,26 @@ func installService(cfg *installConfig, binPath string) error {
 	printSummary(cfg)
 	return nil
 }
+
+// uninstallService Windows：卸载组件（删计划任务、删二进制与配置）。
+func uninstallService(comp string) error {
+	installDir := `C:\Program Files\rtctl`
+	if comp == "" {
+		comp = "all"
+	}
+	for _, c := range []string{"agent", "clientd"} {
+		if comp != "all" && comp != c {
+			continue
+		}
+		exec.Command("schtasks", "/Delete", "/TN", "rtctl-"+c, "/F").Run()
+		switch c {
+		case "agent":
+			os.Remove(filepath.Join(installDir, "rtctl-agent.exe"))
+		case "clientd":
+			os.Remove(filepath.Join(installDir, "rtctl-client.exe"))
+			os.Remove(filepath.Join(installDir, "clientd-devices.json"))
+		}
+		fmt.Printf("✔ %s 已卸载\n", c)
+	}
+	return nil
+}

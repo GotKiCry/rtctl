@@ -1,77 +1,47 @@
 # rtctl 一键部署（纯直连版）
 
-**两个入口任选**：二进制向导（交互式引导）或脚本（非交互）。
-
-## 推荐：二进制向导（一条指令）
+## 一条指令直达管理菜单（推荐，v2ray-agent 风格）
 
 ```bash
-# Linux（被控机/操作机通用）
-curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard-linux-amd64 -o rtctl-wizard
-chmod +x rtctl-wizard && sudo ./rtctl-wizard
+# Linux（root 执行；非 root 自动提权）
+wget -P /root -N --no-check-certificate "https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.sh" \
+  && chmod 700 /root/deploy.sh && /root/deploy.sh
 ```
 
 ```powershell
 # Windows（管理员 PowerShell）
-irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard.exe -OutFile rtctl-wizard.exe
-.\rtctl-wizard.exe
-```
-
-向导引导：选组件（**agent 被控端 / clientd 控制服务 / client**）→ 设备 ID → 端口 → token（自动生成高熵或手动自定义）→ WSS 可选 → 装完立即运行 + 开机自启（Linux systemd / Windows 计划任务）→ 打印验证命令与可复制的 clientd 设备清单片段。
-
-非交互（脚本化）与预览：
-
-```bash
-sudo ./rtctl-wizard --component agent --id jp-tokyo-01 --listen :8443 --gen-token
-sudo ./rtctl-wizard --component clientd --devices devices.json --gen-api-key
-./rtctl-wizard --component client
-./rtctl-wizard --component agent --id X --listen :8443 --token T --dry-run   # 只预览不安装
-```
-
-## 脚本版
-
-### ① 每台被控机：装 agent（自带监听，无需中继）
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.sh -o deploy.sh
-bash deploy.sh agent --listen :8443 --id jp-tokyo-01 --token <自定高熵token>
-```
-
-```powershell
 irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.ps1 -OutFile deploy.ps1
-.\deploy.ps1 -Mode Agent -Listen ':8443' -Id jp-tokyo-01 -Token '<token>'
+.\deploy.ps1
 ```
 
-脚本自动：下载二进制 → 低权限用户（Linux）→ 注册开机自启服务（token 经环境变量注入，不进命令行）→ 启动。防火墙放行监听端口。生产建议加 `--tls-cert/--tls-key` 开 WSS。
+无参数运行进入**循环管理菜单**：
 
-### ② 操作机：装 clientd（AI Agent 直控入口）
-
-设备清单里给每台设备写 `url` 直连地址：
-
-```json
-{ "devices": [ { "id": "jp-tokyo-01", "url": "ws://jp服务器IP:8443/ws", "token": "<token>" } ] }
 ```
+  [1] 安装 agent（被控端）               ← 引导：设备ID → 端口 → token(自动生成/手动) → WSS
+  [2] 安装 clientd（AI Agent 直控服务）   ← 引导：设备清单路径 → 监听地址 → API密钥
+  [3] 查看状态（运行 + 开机自启）
+  [4] 升级到最新版
+  [5] 卸载组件
+  [6] 退出
+```
+
+装完**立即后台运行 + 开机自启**（Linux systemd enabled / Windows 计划任务开机触发），结尾打印验证命令与可复制的 clientd 设备清单片段。
+
+## 二进制向导版（交互问答 + status/uninstall 子命令）
 
 ```bash
-bash deploy.sh clientd --devices devices.json
+curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard-linux-amd64 -o rtctl-wizard
+chmod +x rtctl-wizard && ./rtctl-wizard      # Linux 非 root 自动提权
+./rtctl-wizard status                        # 查看运行状态与开机自启
+./rtctl-wizard uninstall agent|clientd|all   # 卸载
 ```
 
-```powershell
-.\deploy.ps1 -Mode Clientd -Devices '.\devices.json'
-```
-
-之后 AI Agent 直接调 HTTP API（API 密钥自动生成，开机自启）：
+## 脚本化（非交互）
 
 ```bash
-curl -H 'Authorization: Bearer <API密钥>' \
-  -d '{"device_id":"jp-tokyo-01","cmd":"uptime","timeout_ms":10000}' \
-  http://127.0.0.1:18080/api/v1/exec
-```
-
-### ③ 验证 / 升级
-
-```bash
-./client-linux-amd64 -server ws://jp服务器IP:8443/ws list              # CLI 直连验证
-bash deploy.sh update agent|client|clientd                             # 升级
+bash deploy.sh agent --listen :8443 --id jp-tokyo-01 --token <token>      # 被控机
+bash deploy.sh clientd --devices devices.json                             # 操作机（AI Agent 入口）
+bash deploy.sh client / status / update agent|clientd / uninstall all
 ```
 
 ## 选项
@@ -87,7 +57,7 @@ bash deploy.sh update agent|client|clientd                             # 升级
 
 | 项 | 已做 |
 |---|---|
-| token 高熵 | 向导自动生成 / 脚本自定（务必用高熵随机串） |
+| token 高熵 | 菜单/向导自动生成 / 脚本自定（务必用高熵随机串） |
 | 低权限运行账户 | Linux agent 默认 rtctl-agent、clientd 默认 rtctl |
 | token 不进命令行 | 环境变量 / 任务环境变量注入 |
 | 设备清单 0600 且归属服务账户 | Linux 安装器自动 chown |

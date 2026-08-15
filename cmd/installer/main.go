@@ -25,6 +25,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -57,8 +58,27 @@ var (
 )
 
 func main() {
+	// Linux 非 root 自动提权（免记 sudo）
+	if runtime.GOOS == "linux" && os.Geteuid() != 0 {
+		cmd := exec.Command("sudo", append([]string{os.Args[0]}, os.Args[1:]...)...)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "status" {
 		printStatus()
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "uninstall" {
+		comp := ""
+		if len(os.Args) > 2 {
+			comp = os.Args[2]
+		}
+		if err := uninstallService(comp); err != nil {
+			log.Fatalf("卸载失败: %v", err)
+		}
 		return
 	}
 	flag.Parse()

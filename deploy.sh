@@ -1,33 +1,46 @@
 #!/usr/bin/env bash
 # ============================================================
-# rtctl 一键部署脚本（唯一入口，Linux，纯直连版）
+# rtctl 一键部署脚本（纯直连版，v2ray-agent 风格交互菜单）
 # ============================================================
-# 用法:
-#   ① 每台被控机（装 agent，自带监听）:
-#       bash deploy.sh agent --listen :8443 --id <设备ID> --token <token>
-#   ② 操作机（装 clientd，给 AI Agent 直控）:
-#       bash deploy.sh clientd --devices <设备清单（条目带 url）> [--listen 127.0.0.1:18080] [--api-key K]
-#   ③ 操作机（拿 client CLI）:
-#       bash deploy.sh client
-#   ④ 升级到仓库最新二进制:
-#       bash deploy.sh update agent|client|clientd
+# 一条指令直达菜单（root 执行，非 root 自动提权）:
+#   wget -P /root -N --no-check-certificate \
+#     "https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.sh" \
+#     && chmod 700 /root/deploy.sh && /root/deploy.sh
+#
+# 无参数运行进入交互菜单（安装 / 状态 / 升级 / 卸载 / 退出）；
+# 也支持非交互子命令（脚本化）:
+#   bash deploy.sh agent   --listen :8443 --id <设备ID> --token <token>
+#   bash deploy.sh clientd --devices <设备清单>
+#   bash deploy.sh status
+#   bash deploy.sh update  agent|clientd
+#   bash deploy.sh uninstall agent|clientd
 #
 # 二进制来源: 本地 ./bin 优先；缺省自动从 GitHub 下载（无需编译）。
 #   私有仓库/内网镜像: 设 GH_BASE 与 GH_TOKEN 环境变量。
-#
-# 免下载直跑（任一台机器，前提是能访问 GitHub）:
-#   curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.sh -o deploy.sh
-#   bash deploy.sh agent --listen :8443 --id jp-tokyo-01 --token <token>
 # ============================================================
 
 set -euo pipefail
-cd "$(dirname "$0")"
+
+# ---------- 自动提权（非 root 时 sudo 重执行） ----------
+if [[ $EUID -ne 0 ]]; then
+  if command -v sudo >/dev/null 2>&1; then
+    exec sudo bash "$(readlink -f "$0")" "$@"
+  fi
+  echo "[rtctl] 需要 root 权限，且未找到 sudo" >&2
+  exit 1
+fi
+
+cd "$(dirname "$(readlink -f "$0")")"
 
 GH_BASE="${GH_BASE:-https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin}"
 GH_TOKEN="${GH_TOKEN:-}"
 
-log()  { echo "[rtctl] $*"; }
-fail() { echo "[rtctl] 错误: $*" >&2; exit 1; }
+# ---------- 颜色 ----------
+C_RED='\033[31m'; C_GREEN='\033[32m'; C_YELLOW='\033[33m'; C_CYAN='\033[36m'; C_NC='\033[0m'
+# 注意: log/warn 输出到 stderr，避免污染命令替换（如 bin="$(get_bin ...)"）
+log()  { echo -e "${C_GREEN}[rtctl]${C_NC} $*" >&2; }
+warn() { echo -e "${C_YELLOW}[提示]${C_NC} $*" >&2; }
+fail() { echo -e "${C_RED}[错误]${C_NC} $*" >&2; exit 1; }
 
 # ---------- 工具函数 ----------
 
@@ -39,7 +52,6 @@ get_arch() {
   esac
 }
 
-# get_bin <name>：优先本地 bin/，否则从 GH_BASE 下载并做 ELF 魔数校验
 get_bin() {
   local name="$1"
   local out="bin/$name"
@@ -65,13 +77,27 @@ gen_token() {
   head -c24 /dev/urandom | od -An -tx1 | tr -d ' \n'
 }
 
-ensure_user() { # ensure_user <name>：存在即返回，否则创建 nologin 用户
+ensure_user() {
   local u="$1"
   [[ "$u" == "root" ]] && return
   id "$u" &>/dev/null || useradd -r -s /usr/sbin/nologin "$u" || fail "创建用户 $u 失败"
 }
 
-# ---------- ① agent ----------
+ask_token() { # 交互式 token 引导：自动生成或手动输入（提示走 stderr，避免污染命令替换）
+  echo -e "  ${C_CYAN}设备 token:${C_NC}" >&2
+  echo "    [1] 自动生成高熵 token（推荐）" >&2
+  echo "    [2] 手动输入" >&2
+  read -rp "  请选择 [1]: " c
+  if [[ "${c:-1}" == "2" ]]; then
+    read -rp "  请输入 token: " t
+    [[ -n "$t" ]] || fail "token 不能为空"
+    echo "$t"
+  else
+    gen_token
+  fi
+}
+
+# ---------- 安装: agent ----------
 
 cmd_agent() {
   local id="" token="" run_user="rtctl-agent" listen="" tls_cert="" tls_key=""
@@ -89,20 +115,19 @@ cmd_agent() {
   [[ -n "$listen" && -n "$id" && -n "$token" ]] || fail "--listen / --id / --token 必填"
   { [[ -n "$tls_cert" && -n "$tls_key" ]] || [[ -z "$tls_cert" && -z "$tls_key" ]]; } \
     || fail "--tls-cert 与 --tls-key 必须同时提供"
-  [[ $EUID -eq 0 ]] || fail "agent 安装需要 root（sudo bash deploy.sh agent ...）"
 
   local bin
   bin="$(get_bin "agent-linux-$(get_arch)")"
   ensure_user "$run_user"
   mkdir -p /etc/rtctl
-  # 先停旧服务，避免覆盖运行中的可执行文件报 text file busy
   systemctl stop rtctl-agent 2>/dev/null || true
   install -m 755 "$bin" /usr/local/bin/rtctl-agent
   echo "$token" > /etc/rtctl/agent.token && chmod 600 /etc/rtctl/agent.token
 
-  local exec_args="-listen \"$listen\""
-  [[ -n "$tls_cert" ]] && exec_args+=" -tls-cert \"$tls_cert\" -tls-key \"$tls_key\""
-  exec_args+=" -id \"$id\""
+  # systemd ExecStart 不做 shell 解析，参数按空格分隔直写即可
+  local exec_args="-listen $listen"
+  [[ -n "$tls_cert" ]] && exec_args+=" -tls-cert $tls_cert -tls-key $tls_key"
+  exec_args+=" -id $id"
 
   cat > /etc/systemd/system/rtctl-agent.service <<EOF
 [Unit]
@@ -127,13 +152,13 @@ EOF
   systemctl is-active --quiet rtctl-agent || fail "启动失败，journalctl -u rtctl-agent 查看"
 
   local port="${listen##*:}"
-  log "✔ agent ($id) 已安装并启动：监听 $listen（开机自启，低权限用户 $run_user）"
+  log "✔ agent ($id) 已安装并启动：监听 $listen（后台运行 + 开机自启，低权限用户 $run_user）"
   log "  验证: client -server ws://<本机IP>:$port/ws exec -token $token 'uptime'"
   log "  clientd 设备清单片段:"
   log "    { \"devices\": [ { \"id\": \"$id\", \"url\": \"ws://<本机IP>:$port/ws\", \"token\": \"$token\" } ] }"
 }
 
-# ---------- ② clientd ----------
+# ---------- 安装: clientd ----------
 
 cmd_clientd() {
   local devices="" listen="127.0.0.1:18080" api_key="" run_user="rtctl"
@@ -147,7 +172,6 @@ cmd_clientd() {
     esac
   done
   [[ -n "$devices" && -f "$devices" ]] || fail "--devices <设备清单文件> 必填（文件需存在；每条设备带 url 直连地址）"
-  [[ $EUID -eq 0 ]] || fail "需要 root（sudo bash deploy.sh clientd ...）"
 
   local bin
   bin="$(get_bin "client-linux-$(get_arch)")"
@@ -181,66 +205,160 @@ EOF
   sleep 1
   systemctl is-active --quiet rtctl-clientd || fail "启动失败，journalctl -u rtctl-clientd 查看"
 
-  log "✔ clientd 已启动并开机自启: http://$listen"
+  log "✔ clientd 已安装并启动：http://$listen（后台运行 + 开机自启）"
   log "  API 密钥: $api_key（Authorization: Bearer $api_key）"
   log "  测试: curl -H 'Authorization: Bearer $api_key' http://$listen/api/v1/devices"
 }
 
-# ---------- ③ client ----------
+# ---------- 状态 ----------
 
-cmd_client() {
-  local bin
-  bin="$(get_bin "client-linux-$(get_arch)")"
-  log "✔ client 就绪: $bin"
-  log "  用法: $bin -server ws://<设备IP>:<端口>/ws exec -token <设备token> 'uptime'"
+cmd_status() {
+  echo -e "${C_CYAN}rtctl 组件状态:${C_NC}"
+  printf "  %-12s %-16s %s\n" "组件" "运行状态" "开机自启"
+  echo "  --------------------------------------------"
+  for u in rtctl-agent rtctl-clientd; do
+    local a e
+    a="$(systemctl is-active $u 2>/dev/null || echo 未安装)"
+    e="$(systemctl is-enabled $u 2>/dev/null || echo 未安装)"
+    printf "  %-12s %-16s %s\n" "${u#rtctl-}" "$a" "$e"
+  done
+  echo
 }
 
-# ---------- ④ update ----------
+# ---------- 卸载 ----------
+
+cmd_uninstall() {
+  local comp="${1:-}"
+  if [[ -z "$comp" ]]; then
+    echo "  要卸载的组件: [1] agent  [2] clientd  [3] 全部"
+    read -rp "  请选择 [3]: " c
+    case "${c:-3}" in
+      1) comp=agent ;;
+      2) comp=clientd ;;
+      *) comp=all ;;
+    esac
+  fi
+  for c in agent clientd; do
+    [[ "$comp" == "all" || "$comp" == "$c" ]] || continue
+    local unit="rtctl-$c"
+    systemctl disable --now "$unit" 2>/dev/null || true
+    rm -f "/etc/systemd/system/$unit.service"
+    case "$c" in
+      agent)   rm -f /usr/local/bin/rtctl-agent /etc/rtctl/agent.token ;;
+      clientd) rm -f /usr/local/bin/rtctl-client /etc/rtctl/clientd-devices.json ;;
+    esac
+    log "✔ $c 已卸载"
+  done
+  systemctl daemon-reload
+}
+
+# ---------- 升级 ----------
 
 cmd_update() {
   local comp="${1:-}"
-  [[ -n "$comp" ]] || fail "用法: bash deploy.sh update agent|client|clientd"
+  [[ -n "$comp" ]] || fail "用法: bash deploy.sh update agent|clientd"
   local name
   case "$comp" in
     agent)   name="agent-linux-$(get_arch)" ;;
-    client|clientd) name="client-linux-$(get_arch)" ;;
+    clientd) name="client-linux-$(get_arch)" ;;
     *) fail "未知组件 $comp" ;;
   esac
   local bin
   bin="$(get_bin "$name")"
   case "$comp" in
-    agent)   [[ $EUID -eq 0 ]] || fail "需要 root"; systemctl stop rtctl-agent 2>/dev/null || true;   install -m 755 "$bin" /usr/local/bin/rtctl-agent;  systemctl restart rtctl-agent;  log "✔ agent 已更新并重启" ;;
-    clientd) [[ $EUID -eq 0 ]] || fail "需要 root"; systemctl stop rtctl-clientd 2>/dev/null || true; install -m 755 "$bin" /usr/local/bin/rtctl-client; systemctl restart rtctl-clientd; log "✔ clientd 已更新并重启" ;;
-    client)  log "✔ client 已更新: $bin" ;;
+    agent)   systemctl stop rtctl-agent 2>/dev/null || true;   install -m 755 "$bin" /usr/local/bin/rtctl-agent;  systemctl restart rtctl-agent;  log "✔ agent 已更新并重启" ;;
+    clientd) systemctl stop rtctl-clientd 2>/dev/null || true; install -m 755 "$bin" /usr/local/bin/rtctl-client; systemctl restart rtctl-clientd; log "✔ clientd 已更新并重启" ;;
   esac
+}
+
+# ---------- 交互菜单 ----------
+
+menu_agent() {
+  echo -e "${C_CYAN}== 安装 agent（被控端：装在目标服务器上，被控制）==${C_NC}"
+  local id listen token tls_yn tls_cert tls_key
+  read -rp "设备 ID（唯一名称，如 jp-tokyo-01）: " id
+  [[ -n "$id" ]] || { warn "设备 ID 不能为空"; return; }
+  read -rp "监听端口 [8443]: " p
+  listen=":${p:-8443}"
+  token="$(ask_token)"
+  read -rp "启用 WSS（需要证书路径）? [y/N]: " tls_yn
+  if [[ "${tls_yn,,}" == "y" ]]; then
+    read -rp "证书路径: " tls_cert
+    read -rp "私钥路径: " tls_key
+  fi
+  cmd_agent --listen "$listen" --id "$id" --token "$token" \
+    ${tls_cert:+--tls-cert "$tls_cert" --tls-key "$tls_key"}
+}
+
+menu_clientd() {
+  echo -e "${C_CYAN}== 安装 clientd（AI Agent 直控服务：装在操作机上）==${C_NC}"
+  local devices listen api_choice api_key
+  read -rp "设备清单文件路径（每条设备带 url 直连地址）: " devices
+  [[ -f "$devices" ]] || { warn "文件不存在: $devices"; return; }
+  read -rp "HTTP 监听地址 [127.0.0.1:18080]: " l
+  listen="${l:-127.0.0.1:18080}"
+  echo -e "  ${C_CYAN}API 密钥:${C_NC} [1] 自动生成（推荐） [2] 手动输入"
+  read -rp "  请选择 [1]: " api_choice
+  if [[ "${api_choice:-1}" == "2" ]]; then read -rp "  请输入 API 密钥: " api_key; fi
+  cmd_clientd --devices "$devices" --listen "$listen" ${api_key:+--api-key "$api_key"}
+}
+
+menu() {
+  while true; do
+    echo
+    echo -e "${C_CYAN}========================================${C_NC}"
+    echo -e "${C_CYAN}   rtctl 远程终端控制 — 管理菜单（纯直连）${C_NC}"
+    echo -e "${C_CYAN}========================================${C_NC}"
+    echo -e "  ${C_GREEN}[1]${C_NC} 安装 agent（被控端）"
+    echo -e "  ${C_GREEN}[2]${C_NC} 安装 clientd（AI Agent 直控服务）"
+    echo -e "  ${C_GREEN}[3]${C_NC} 查看状态（运行 + 开机自启）"
+    echo -e "  ${C_GREEN}[4]${C_NC} 升级到最新版"
+    echo -e "  ${C_GREEN}[5]${C_NC} 卸载组件"
+    echo -e "  ${C_GREEN}[6]${C_NC} 退出"
+    read -rp "请选择 [6]: " choice
+    case "${choice:-6}" in
+      1) menu_agent ;;
+      2) menu_clientd ;;
+      3) cmd_status ;;
+      4)
+        read -rp "升级组件 [1] agent [2] clientd: " uc
+        case "${uc:-1}" in 1) cmd_update agent ;; 2) cmd_update clientd ;; *) warn "跳过" ;; esac
+        ;;
+      5) cmd_uninstall ;;
+      6) log "再见"; exit 0 ;;
+      *) warn "无效选择" ;;
+    esac
+  done
 }
 
 # ---------- 入口 ----------
 
 case "${1:-}" in
-  agent)   shift; cmd_agent "$@" ;;
-  clientd) shift; cmd_clientd "$@" ;;
-  client)  cmd_client ;;
-  update)  shift; cmd_update "${1:-}" ;;
-  -h|--help|"")
+  agent)     shift; cmd_agent "$@" ;;
+  clientd)   shift; cmd_clientd "$@" ;;
+  status)    cmd_status ;;
+  uninstall) shift; cmd_uninstall "${1:-}" ;;
+  update)    shift; cmd_update "${1:-}" ;;
+  client)
+    local bin; bin="$(get_bin "client-linux-$(get_arch)")"
+    log "✔ client 就绪: $bin"
+    log "  用法: $bin -server ws://<设备IP>:<端口>/ws exec -token <token> 'uptime'"
+    ;;
+  -h|--help)
     cat <<EOF
-rtctl 一键部署脚本（纯直连版）
+rtctl 一键部署（纯直连版）
 
 用法:
-  bash deploy.sh agent --listen :8443 --id <设备ID> --token <token> [--tls-cert C --tls-key K]
-      在被控机安装 agent（自带 WS 监听，client/clientd 直连）
-
-  bash deploy.sh clientd --devices <设备清单> [--listen 127.0.0.1:18080] [--api-key K]
-      在操作机安装常驻 HTTP 服务（AI Agent 直控入口；设备清单每条带 url）
-
-  bash deploy.sh client
-      在操作机取 client 二进制
-
-  bash deploy.sh update agent|client|clientd
-      拉取仓库最新二进制并重启服务
+  bash deploy.sh           交互菜单（安装 / 状态 / 升级 / 卸载）
+  bash deploy.sh agent     --listen :8443 --id <ID> --token <token> [--tls-cert C --tls-key K]
+  bash deploy.sh clientd   --devices <设备清单> [--listen 127.0.0.1:18080] [--api-key K]
+  bash deploy.sh client    仅下载 client 二进制
+  bash deploy.sh status    查看状态
+  bash deploy.sh update    agent|clientd
+  bash deploy.sh uninstall agent|clientd|all
 
 二进制来源: 本地 ./bin 优先；缺省自动从 GitHub 下载（设 GH_BASE/GH_TOKEN 可指向私有源或镜像）
 EOF
-    exit 0 ;;
-  *) fail "未知命令: $1（agent / clientd / client / update）" ;;
+    ;;
+  *) menu ;;
 esac

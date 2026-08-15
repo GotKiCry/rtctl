@@ -61,29 +61,34 @@ CLI 也可直连：`./bin/client -server ws://jp服务器IP:8443/ws exec -token 
 
 CLI 文件传输：`client file-put -token T local.txt /etc/remote.txt`、`client file-get -token T /var/log/app.log ./app.log`
 
-## 一条指令安装（二进制向导，推荐）
+## 一条指令安装（交互菜单，推荐）
 
-下载一个二进制向导，运行即进入交互式安装：**引导选择组件、端口、token（可自动生成或自定义）**，装完立即运行并开机自启：
+v2ray-agent 风格：一条命令直达**彩色管理菜单**（安装 / 状态 / 升级 / 卸载，装完立即后台运行 + 开机自启）：
 
 ```bash
-# Linux（被控机 / 操作机通用，一条指令）
-curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard-linux-amd64 -o rtctl-wizard
-chmod +x rtctl-wizard && sudo ./rtctl-wizard
-
-# Windows（管理员 PowerShell，一条指令）
-# irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard.exe -OutFile rtctl-wizard.exe
-# .\rtctl-wizard.exe
-
-# 非交互（脚本化）:
-sudo ./rtctl-wizard --component agent --id jp-tokyo-01 --listen :8443 --gen-token
-sudo ./rtctl-wizard --component clientd --devices devices.json --gen-api-key
-./rtctl-wizard --component client      # 仅下载 client
-./rtctl-wizard --component agent --id X --listen :8443 --token T --dry-run  # 只预览不安装
+# Linux（root 执行；非 root 会自动提权，交互式引导端口/token 可自动生成或自定义）
+wget -P /root -N --no-check-certificate "https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.sh" \
+  && chmod 700 /root/deploy.sh && /root/deploy.sh
 ```
 
-向导结尾会打印：验证命令、生成的 token / API 密钥、可复制的 clientd 设备清单片段。
+```powershell
+# Windows（管理员 PowerShell）
+irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.ps1 -OutFile deploy.ps1
+.\deploy.ps1
+```
 
-脚本化部署（`deploy.sh` / `deploy.ps1`）仍可用，详见 [deploy/README.md](deploy/README.md)。
+菜单选项：`[1] 安装 agent`（被控端）· `[2] 安装 clientd`（AI Agent 直控服务）· `[3] 查看状态（运行+开机自启）` · `[4] 升级` · `[5] 卸载` · `[6] 退出`。
+
+**二进制向导版**（交互式问答，同样装完即运行 + 开机自启）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard-linux-amd64 -o rtctl-wizard
+chmod +x rtctl-wizard && ./rtctl-wizard        # Linux 非 root 自动提权
+./rtctl-wizard status                          # 一键查看运行状态与开机自启
+./rtctl-wizard uninstall agent|clientd|all     # 卸载
+```
+
+脚本化部署（`deploy.sh agent --listen :8443 --id X --token T` 等）仍可用，详见 [deploy/README.md](deploy/README.md)。
 
 ## 安全
 

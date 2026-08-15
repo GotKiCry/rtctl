@@ -93,3 +93,29 @@ func installService(cfg *installConfig, binPath string) error {
 	printSummary(cfg)
 	return nil
 }
+
+// uninstallService Linux：卸载组件（停止服务、删 unit、删二进制与配置）。
+func uninstallService(comp string) error {
+	if comp == "" {
+		comp = "all"
+	}
+	for _, c := range []string{"agent", "clientd"} {
+		if comp != "all" && comp != c {
+			continue
+		}
+		unit := "rtctl-" + c
+		exec.Command("systemctl", "disable", "--now", unit).Run()
+		os.Remove("/etc/systemd/system/" + unit + ".service")
+		switch c {
+		case "agent":
+			os.Remove("/usr/local/bin/rtctl-agent")
+			os.Remove("/etc/rtctl/agent.token")
+		case "clientd":
+			os.Remove("/usr/local/bin/rtctl-client")
+			os.Remove("/etc/rtctl/clientd-devices.json")
+		}
+		fmt.Printf("✔ %s 已卸载\n", c)
+	}
+	exec.Command("systemctl", "daemon-reload").Run()
+	return nil
+}

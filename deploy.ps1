@@ -1,21 +1,22 @@
 # ============================================================
-# rtctl 一键部署脚本（唯一入口，Windows，纯直连版，管理员 PowerShell）
+# rtctl 一键部署脚本（Windows，纯直连版，v2ray-agent 风格交互菜单）
 # ============================================================
-# 用法:
-#   ① 被控机（装 agent，自带监听）:
-#       .\deploy.ps1 -Mode Agent -Listen ':8443' -Id win-web-01 -Token '<token>'
-#   ② 操作机（装 clientd，AI Agent 直控入口）:
-#       .\deploy.ps1 -Mode Clientd -Devices '.\devices.json'
-#   ③ 操作机（取 client）:
-#       .\deploy.ps1 -Mode Client
-#   ④ 升级: .\deploy.ps1 -Mode Update -Component agent|client|clientd
+# 一条指令直达菜单（管理员 PowerShell）:
+#   irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.ps1 -OutFile deploy.ps1
+#   .\deploy.ps1
 #
-# 二进制来源: 本地 .\bin 优先；缺省自动从 GitHub 下载（私有仓库设 -GhToken）。
-# 免下载直跑: irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.ps1 -OutFile deploy.ps1
+# 无参数运行进入交互菜单（安装 / 状态 / 升级 / 卸载 / 退出）；
+# 也支持非交互模式（脚本化）:
+#   .\deploy.ps1 -Mode Agent    -Listen ':8443' -Id win-web-01 -Token '<token>'
+#   .\deploy.ps1 -Mode Clientd  -Devices '.\devices.json'
+#   .\deploy.ps1 -Mode Client
+#   .\deploy.ps1 -Mode Status
+#   .\deploy.ps1 -Mode Update   -Component agent|clientd
+#   .\deploy.ps1 -Mode Uninstall -Component agent|clientd|all
 # ============================================================
 
 param(
-    [Parameter(Mandatory=$true)][ValidateSet('Agent','Clientd','Client','Update')][string]$Mode,
+    [ValidateSet('Agent','Clientd','Client','Status','Update','Uninstall')][string]$Mode,
     [string]$Listen,
     [string[]]$Id,
     [string]$Token,
@@ -51,6 +52,19 @@ function New-Token {
     $b = New-Object byte[] 24
     [System.Security.Cryptography.RandomNumberGenerator]::Fill($b)
     return (($b | ForEach-Object { $_.ToString('x2') }) -join '')
+}
+
+function Ask-Token {
+    Write-Host "  设备 token:"
+    Write-Host "    [1] 自动生成高熵 token（推荐）"
+    Write-Host "    [2] 手动输入"
+    $c = Read-Host "  请选择 [1]"
+    if ($c -eq '2') {
+        $t = Read-Host "  请输入 token"
+        if (-not $t) { throw 'token 不能为空' }
+        return $t
+    }
+    return (New-Token)
 }
 
 function Install-Task([string]$TaskName, [string]$ExePath, [string]$Args, [string]$Desc, [string]$EnvName, [string]$EnvValue) {
@@ -92,27 +106,21 @@ $envXml    </Exec>
     schtasks /Run /TN $TaskName | Out-Null
 }
 
-# ---------- ① Agent ----------
-
-if ($Mode -eq 'Agent') {
+function Install-Agent([string]$Listen, [string]$Id, [string]$Token) {
     if (-not $Listen -or -not $Id -or -not $Token) { throw "-Listen / -Id / -Token 必填" }
-    $singleId = @($Id)[0]
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     $bin = Get-Bin 'agent.exe'
     Copy-Item $bin (Join-Path $InstallDir 'rtctl-agent.exe') -Force
     Install-Task 'rtctl-agent' (Join-Path $InstallDir 'rtctl-agent.exe') `
-        "-listen `"$Listen`" -id `"$singleId`"" `
-        "rtctl agent (device $singleId)" 'RTCTL_TOKEN' $Token
+        "-listen `"$Listen`" -id `"$Id`"" `
+        "rtctl agent (device $Id)" 'RTCTL_TOKEN' $Token
     $port = $Listen -replace '.*:', ''
-    Write-Host "[rtctl] ✔ agent ($singleId) 已安装并启动：监听 $Listen（开机自启，SYSTEM 账户）"
+    Write-Host "[rtctl] ✔ agent ($Id) 已安装并启动：监听 $Listen（后台运行 + 开机自启，SYSTEM 账户）"
     Write-Host "[rtctl]   防火墙放行: netsh advfirewall firewall add rule name=rtctl-agent dir=in action=allow protocol=TCP localport=$port"
     Write-Host "[rtctl]   验证: client.exe -server ws://<本机IP>:$port/ws exec -token $Token 'echo ok'"
-    Write-Host "[rtctl]   卸载: schtasks /Delete /TN rtctl-agent /F"
 }
 
-# ---------- ② Clientd ----------
-
-if ($Mode -eq 'Clientd') {
+function Install-Clientd([string]$Devices, [string]$HttpListen, [string]$ApiKey) {
     if (-not $Devices -or -not (Test-Path $Devices)) { throw "-Devices <设备清单文件> 必填（每条设备带 url 直连地址）" }
     if (-not $ApiKey) { $ApiKey = New-Token }
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -122,27 +130,103 @@ if ($Mode -eq 'Clientd') {
     Install-Task 'rtctl-clientd' (Join-Path $InstallDir 'rtctl-client.exe') `
         "-client-id clientd serve -listen `"$HttpListen`" -devices `"$InstallDir\clientd-devices.json`" -api-key `"$ApiKey`"" `
         'rtctl client service (HTTP API for AI agents)' '' ''
-    Write-Host "[rtctl] ✔ clientd 已安装并启动: http://$HttpListen（开机自启）"
+    Write-Host "[rtctl] ✔ clientd 已安装并启动: http://$HttpListen（后台运行 + 开机自启）"
     Write-Host "[rtctl]   API 密钥: $ApiKey（Authorization: Bearer $ApiKey）"
     Write-Host "[rtctl]   测试: Invoke-RestMethod http://$HttpListen/api/v1/devices -Headers @{Authorization='Bearer $ApiKey'}"
 }
 
-# ---------- ③ Client ----------
-
-if ($Mode -eq 'Client') {
-    $bin = Get-Bin 'client.exe'
-    Write-Host "[rtctl] ✔ client 就绪: $bin"
-    Write-Host "[rtctl]   用法: $bin -server ws://<设备IP>:<端口>/ws exec -token <设备token> 'uptime'"
+function Show-Status {
+    Write-Host "rtctl 组件状态:"
+    Write-Host ("  {0,-12} {1,-16} {2}" -f '组件','运行状态','开机自启')
+    Write-Host '  --------------------------------------------'
+    foreach ($t in 'rtctl-agent','rtctl-clientd') {
+        $out = schtasks /Query /TN $t /FO LIST 2>$null | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            $st = '未安装'; $en = '未安装'
+        } else {
+            $st = if ($out -match '正在运行|Running') { '运行中' } elseif ($out -match '就绪|Ready') { '已就绪（未运行）' } else { '已安装' }
+            $en = '已安装'
+        }
+        Write-Host ("  {0,-12} {1,-16} {2}" -f ($t -replace '^rtctl-',''),$st,$en)
+    }
 }
 
-# ---------- ④ Update ----------
+function Uninstall-Rtctl([string]$Comp) {
+    if (-not $Comp) { $Comp = 'all' }
+    foreach ($c in 'agent','clientd') {
+        if ($Comp -ne 'all' -and $Comp -ne $c) { continue }
+        schtasks /Delete /TN "rtctl-$c" /F 2>$null | Out-Null
+        switch ($c) {
+            'agent'   { Remove-Item (Join-Path $InstallDir 'rtctl-agent.exe') -Force -ErrorAction SilentlyContinue }
+            'clientd' { Remove-Item (Join-Path $InstallDir 'rtctl-client.exe'), (Join-Path $InstallDir 'clientd-devices.json') -Force -ErrorAction SilentlyContinue }
+        }
+        Write-Host "[rtctl] ✔ $c 已卸载"
+    }
+}
 
-if ($Mode -eq 'Update') {
-    if (-not $Component) { throw "Update 模式需要 -Component agent|client|clientd" }
-    switch ($Component.ToLower()) {
+function Update-Rtctl([string]$Comp) {
+    switch ($Comp) {
         'agent'   { $bin = Get-Bin 'agent.exe';  Copy-Item $bin (Join-Path $InstallDir 'rtctl-agent.exe') -Force; schtasks /End /TN rtctl-agent | Out-Null;  schtasks /Run /TN rtctl-agent | Out-Null;  Write-Host '[rtctl] ✔ agent 已更新并重启' }
         'clientd' { $bin = Get-Bin 'client.exe'; Copy-Item $bin (Join-Path $InstallDir 'rtctl-client.exe') -Force; schtasks /End /TN rtctl-clientd | Out-Null; schtasks /Run /TN rtctl-clientd | Out-Null; Write-Host '[rtctl] ✔ clientd 已更新并重启' }
-        'client'  { $bin = Get-Bin 'client.exe'; Write-Host "[rtctl] ✔ client 已更新: $bin" }
-        default   { throw "未知组件 $Component" }
+        default   { throw "未知组件 $Comp" }
+    }
+}
+
+# ---------- 非交互模式 ----------
+
+if ($Mode -eq 'Agent')     { Install-Agent $Listen (@($Id)[0]) $Token }
+if ($Mode -eq 'Clientd')   { Install-Clientd $Devices $HttpListen $ApiKey }
+if ($Mode -eq 'Client')    { $bin = Get-Bin 'client.exe'; Write-Host "[rtctl] ✔ client 就绪: $bin"; Write-Host "[rtctl]   用法: $bin -server ws://<设备IP>:<端口>/ws exec -token <token> 'uptime'" }
+if ($Mode -eq 'Status')    { Show-Status }
+if ($Mode -eq 'Update')    { Update-Rtctl $Component }
+if ($Mode -eq 'Uninstall') { Uninstall-Rtctl $Component }
+
+# ---------- 交互菜单 ----------
+
+if (-not $Mode) {
+    while ($true) {
+        Write-Host ''
+        Write-Host '========================================'
+        Write-Host '   rtctl 远程终端控制 — 管理菜单（纯直连）'
+        Write-Host '========================================'
+        Write-Host '  [1] 安装 agent（被控端）'
+        Write-Host '  [2] 安装 clientd（AI Agent 直控服务）'
+        Write-Host '  [3] 查看状态（运行 + 开机自启）'
+        Write-Host '  [4] 升级到最新版'
+        Write-Host '  [5] 卸载组件'
+        Write-Host '  [6] 退出'
+        $choice = Read-Host '请选择 [6]'
+        switch ($choice) {
+            '1' {
+                $id = Read-Host '设备 ID（唯一名称，如 jp-tokyo-01）'
+                if (-not $id) { Write-Host '[提示] 设备 ID 不能为空'; continue }
+                $p = Read-Host '监听端口 [8443]'
+                $listen = ':' + $(if ($p) { $p } else { '8443' })
+                $token = Ask-Token
+                Install-Agent $listen $id $token
+            }
+            '2' {
+                $devices = Read-Host '设备清单文件路径（每条设备带 url 直连地址）'
+                if (-not (Test-Path $devices)) { Write-Host "[提示] 文件不存在: $devices"; continue }
+                $l = Read-Host 'HTTP 监听地址 [127.0.0.1:18080]'
+                $hl = if ($l) { $l } else { '127.0.0.1:18080' }
+                Write-Host '  API 密钥: [1] 自动生成（推荐） [2] 手动输入'
+                $ac = Read-Host '  请选择 [1]'
+                $ak = $null
+                if ($ac -eq '2') { $ak = Read-Host '  请输入 API 密钥' }
+                Install-Clientd $devices $hl $ak
+            }
+            '3' { Show-Status }
+            '4' {
+                $uc = Read-Host '升级组件 [1] agent [2] clientd'
+                if ($uc -eq '2') { Update-Rtctl 'clientd' } else { Update-Rtctl 'agent' }
+            }
+            '5' {
+                $uc = Read-Host '卸载组件 [1] agent [2] clientd [3] 全部'
+                switch ($uc) { '1' { Uninstall-Rtctl 'agent' } '2' { Uninstall-Rtctl 'clientd' } default { Uninstall-Rtctl 'all' } }
+            }
+            '6' { Write-Host '[rtctl] 再见'; exit 0 }
+            default { Write-Host '[提示] 无效选择' }
+        }
     }
 }
