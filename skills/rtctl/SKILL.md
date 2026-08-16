@@ -88,6 +88,7 @@ rtctl/
 - **shell 会话 ID 两端兜底**：client 用 `idutil.New()` 生成；agent 收到空 ID 时兜底生成并在 shell_ack 回传（历史 bug：空 ID 让多个 shell 在注册表里互相覆盖、按键串台、断连清理误杀）。
 - **并发闸持有到资源释放**：shell 信号量在会话退出 goroutine 里释放（历史 bug：`defer` 在 handleShellOpen 返回时释放，maxConcurrentShell 形同虚设）。
 - **ID 冲突必须拒绝**：exec / file_put / shell_open 注册前查重，冲突回 `conflict`（契约 6.4）；重复 ID 会覆盖注册表导致 kill 失效、输出混杂。
+- **deploy.sh 的 grep 无匹配会杀死脚本**：`set -euo pipefail` 下 `$(... | grep ... | ...)` 任一环节无匹配就 exit 1，赋值语句失败即整脚本退出（cmd_info 非 root 读不到 env 文件走 fallback 时实测中招）。所有"探测性"管道一律 `|| true` 兜底。
 
 ## 修改检查清单
 
