@@ -78,10 +78,16 @@ func buildWinPlan(cfg *installConfig, installDir string) (*winPlan, error) {
 		if cfg.tlsCert != "" {
 			plan.args += fmt.Sprintf(" -tls-cert %q -tls-key %q", cfg.tlsCert, cfg.tlsKey)
 		}
+		if cfg.allowSudo {
+			plan.args += " -allow-sudo" // SYSTEM 已最高权限，仅为协议一致性
+		}
 	case "clientd":
 		plan.exeName, plan.taskName = "rtctl-client.exe", "rtctl-clientd"
 		devicesAbs, _ := filepath.Abs(cfg.devices)
 		plan.args = fmt.Sprintf("-client-id clientd serve -listen %q -devices %q -api-key %q", cfg.httpListen, devicesAbs, cfg.apiKey)
+		if cfg.allowSudo {
+			plan.args += " -allow-sudo"
+		}
 	default:
 		return nil, fmt.Errorf("未知组件: %s", cfg.component)
 	}

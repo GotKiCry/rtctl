@@ -55,8 +55,9 @@ type deviceTarget struct {
 // ---- HTTP 层 ----
 
 type serveAPI struct {
-	apiKey  string
-	devices map[string]deviceTarget
+	apiKey    string
+	allowSudo bool // 用户批准闸：true 才转发 sudo:true 特权命令
+	devices   map[string]deviceTarget
 }
 
 func cmdServe(args []string) error {
@@ -64,6 +65,7 @@ func cmdServe(args []string) error {
 	listen := sub.String("listen", "127.0.0.1:18080", "HTTP 监听地址（Agent 调用入口）")
 	devicesFile := sub.String("devices", "devices.json", "设备清单（device_id -> token + url 直连地址）")
 	apiKey := sub.String("api-key", "", "API 密钥（留空自动生成并打印一次）")
+	allowSudo := sub.Bool("allow-sudo", false, "允许转发特权命令（sudo:true）；未开启时特权请求回 approval_required，需用户批准后开启")
 	sub.Parse(args)
 
 	data, err := os.ReadFile(*devicesFile)
@@ -88,7 +90,7 @@ func cmdServe(args []string) error {
 		*apiKey = idutil.New()
 		log.Printf("[clientd] 未指定 -api-key，已自动生成: %s", *apiKey)
 	}
-	api := &serveAPI{apiKey: *apiKey, devices: devices}
+	api := &serveAPI{apiKey: *apiKey, allowSudo: *allowSudo, devices: devices}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
@@ -102,7 +104,7 @@ func cmdServe(args []string) error {
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	log.Printf("[clientd] HTTP 服务启动: http://%s  (Authorization: Bearer %s)", *listen, *apiKey)
+	log.Printf("[clientd] HTTP 服务启动: http://%s  (Authorization: Bearer %s) allow-sudo=%v", *listen, *apiKey, *allowSudo)
 	return httpSrv.ListenAndServe()
 }
 
@@ -200,6 +202,7 @@ type execReq struct {
 	TimeoutMS int    `json:"timeout_ms"`
 	Workdir   string `json:"workdir"`
 	Stdin     string `json:"stdin"`
+	Sudo      bool   `json:"sudo"` // true = 特权命令（需 clientd 开启 -allow-sudo 才转发）
 }
 
 // handleExec 执行命令并等待完成（直连）。
@@ -218,6 +221,15 @@ func (a *serveAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, proto.ErrorCodeBadDevice, "未知设备: "+req.DeviceID)
 		return
 	}
+	// 特权命令审批闸：未获用户批准（clientd 未开 -allow-sudo）→ 403，绝不降级静默执行
+	if req.Sudo && !a.allowSudo {
+		writeErr(w, http.StatusForbidden, proto.ErrorCodeApprovalRequired,
+			"特权命令未获用户批准：clientd 未开启 -allow-sudo（AI Agent 需先征得用户同意，由用户在控制机以 -allow-sudo 开启）")
+		return
+	}
+	if req.Sudo {
+		log.Printf("[clientd] 特权命令(SUDO) device=%s cmd=%s", req.DeviceID, req.Cmd)
+	}
 	overall := 1 * time.Hour
 	if req.TimeoutMS > 0 {
 		overall = time.Duration(req.TimeoutMS)*time.Millisecond + 30*time.Second
@@ -234,7 +246,7 @@ func (a *serveAPI) handleExec(w http.ResponseWriter, r *http.Request) {
 
 	id := idutil.New()
 	m := proto.Msg{Type: proto.TypeExec, ID: id, Token: tgt.token}
-	m, _ = proto.WithPayload(m, proto.ExecPayload{Cmd: req.Cmd, TimeoutMS: req.TimeoutMS, Workdir: req.Workdir, Stdin: req.Stdin})
+	m, _ = proto.WithPayload(m, proto.ExecPayload{Cmd: req.Cmd, TimeoutMS: req.TimeoutMS, Workdir: req.Workdir, Stdin: req.Stdin, Sudo: req.Sudo})
 	if err := conn.WriteJSON(m); err != nil {
 		writeErr(w, http.StatusBadGateway, proto.ErrorCodeConnLost, err.Error())
 		return

@@ -87,6 +87,7 @@ type ExecPayload struct {
 	TimeoutMS int    `json:"timeout_ms,omitempty"` // 0 表示不限制
 	Workdir   string `json:"workdir,omitempty"`
 	Stdin     string `json:"stdin,omitempty"` // 写入进程 stdin 后关闭（非交互输入）
+	Sudo      bool   `json:"sudo,omitempty"`  // true = 请求 root 提权执行（需被控端开启 -allow-sudo；审批语义见 DESIGN.md）
 }
 
 // ExecOutputPayload 执行输出分片；最后一帧 Done=true 携带退出码。
@@ -176,4 +177,9 @@ const (
 	ErrorCodeBadDevice    = "bad_device"      // 未知设备 ID（clientd 配置中不存在）
 	ErrorCodeConnLost     = "connection_lost" // 与设备的连接断开
 	ErrorCodeInternal     = "internal"        // 内部错误
+
+	// 特权命令（sudo）相关：
+	ErrorCodeSudoDisabled     = "sudo_disabled"     // 被控端未开启 -allow-sudo（需人工在被控端授权）
+	ErrorCodeSudoDenied       = "sudo_denied"       // sudo 执行失败（sudoers 未放行 / 密码缺失）
+	ErrorCodeApprovalRequired = "approval_required" // 控制端 clientd 未开启 -allow-sudo（需人工在控制端批准）
 )

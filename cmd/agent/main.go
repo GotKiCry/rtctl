@@ -18,6 +18,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "TLS 证书路径")
 	tlsKey := flag.String("tls-key", "", "TLS 私钥路径")
 	allowAnyOrigin := flag.Bool("allow-any-origin", false, "放行任意 Origin（Web 接入用）")
+	allowSudo := flag.Bool("allow-sudo", false, "允许特权命令（sudo:true 经 sudo 提权执行；需 sudoers NOPASSWD 放行，默认关闭）")
 	id := flag.String("id", "", "设备 ID（或环境变量 RTCTL_ID）")
 	token := flag.String("token", "", "设备 token（或环境变量 RTCTL_TOKEN）")
 	flag.Parse()
@@ -36,10 +37,11 @@ func main() {
 	}
 
 	a := agent.New(*id, *token)
+	a.AllowSudo = *allowSudo
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("rtctl-agent 启动: id=%s listen=%s（直连模式，无需中继）", *id, *listen)
+	log.Printf("rtctl-agent 启动: id=%s listen=%s（直连模式，无需中继）allow-sudo=%v", *id, *listen, *allowSudo)
 	if err := a.ServeStandalone(ctx, *listen, *tlsCert, *tlsKey, *allowAnyOrigin); err != nil {
 		log.Fatalf("agent 退出: %v", err)
 	}

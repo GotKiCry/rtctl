@@ -41,8 +41,8 @@ chmod +x rtctl-wizard && ./rtctl-wizard      # Linux 非 root 自动提权
 ## 脚本化（非交互）
 
 ```bash
-bash deploy.sh agent --listen :8443 --id jp-tokyo-01 --token <token>      # 被控机
-bash deploy.sh clientd --devices devices.json                             # 操作机（AI Agent 入口）
+bash deploy.sh agent --listen :8443 --id jp-tokyo-01 --token <token> [--allow-sudo]  # 被控机；--allow-sudo=允许特权命令（写 sudoers）
+bash deploy.sh clientd --devices devices.json [--allow-sudo]                        # 操作机（AI Agent 入口）；--allow-sudo=开启特权转发闸
 bash deploy.sh client / status / info / update agent|clientd / uninstall all
 ```
 
@@ -52,7 +52,9 @@ bash deploy.sh client / status / info / update agent|clientd / uninstall all
 |---|---|
 | `agent --listen` | agent 监听地址（默认向导 :8443） |
 | `agent --tls-cert --tls-key` | WSS |
+| `agent --allow-sudo` | 允许特权命令：写 sudoers 最小放行（/bin/sh、/usr/bin/kill）+ NoNewPrivileges=false + `-allow-sudo`；默认关 |
 | `clientd --listen / --api-key` | HTTP 监听地址 / API 密钥（默认自动生成） |
+| `clientd --allow-sudo` | 特权转发闸：开才转发 sudo:true，否则 403 approval_required；默认关 |
 | 环境变量 `GH_BASE` | 二进制下载源（内网镜像/私有仓库） |
 
 ## 安全基线
@@ -65,3 +67,4 @@ bash deploy.sh client / status / info / update agent|clientd / uninstall all
 | 设备清单 0600 且归属服务账户 | Linux 安装器自动 chown |
 | 跨源防护 | agent 默认拒绝跨源 Origin |
 | WSS/TLS | 传参启用（生产必开） |
+| 特权命令默认拒绝 | 三道闸（被控端授权 / 控制端批准 / sudoers 放行）全部由人显式打开；卸载自动清 sudoers |

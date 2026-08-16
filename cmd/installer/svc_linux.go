@@ -75,6 +75,20 @@ func installService(cfg *installConfig, binPath string) error {
 		}
 	}
 
+	// sudoers 放行（root:root 0440，visudo 校验；不授权时移除旧文件）
+	sudoersPath := "/etc/sudoers.d/rtctl-agent"
+	if plan.sudoers != "" {
+		if err := os.WriteFile(sudoersPath, []byte(plan.sudoers), 0o440); err != nil {
+			return fmt.Errorf("写入 %s 失败: %w", sudoersPath, err)
+		}
+		if out, err := exec.Command("visudo", "-c", "-f", sudoersPath).CombinedOutput(); err != nil {
+			os.Remove(sudoersPath)
+			return fmt.Errorf("sudoers 校验失败: %v %s", err, out)
+		}
+	} else if cfg.component == "agent" {
+		os.Remove(sudoersPath) // 重装为不授权：清掉旧放行
+	}
+
 	unitPath := "/etc/systemd/system/" + plan.unitName + ".service"
 	if err := os.WriteFile(unitPath, []byte(plan.unit), 0o644); err != nil {
 		return fmt.Errorf("写入 unit 失败: %w", err)
@@ -110,6 +124,7 @@ func uninstallService(comp string) error {
 		case "agent":
 			os.Remove("/usr/local/bin/rtctl-agent")
 			os.Remove("/etc/rtctl/agent.token")
+			os.Remove("/etc/sudoers.d/rtctl-agent")
 		case "clientd":
 			os.Remove("/usr/local/bin/rtctl-client")
 			os.Remove("/etc/rtctl/clientd-devices.json")

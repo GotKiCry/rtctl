@@ -52,6 +52,7 @@ var (
 	flTLSCert    = flag.String("tls-cert", "", "TLS 证书路径")
 	flTLSKey     = flag.String("tls-key", "", "TLS 私钥路径")
 	flUser       = flag.String("user", "", "运行账户（Linux，默认自动创建低权限用户）")
+	flAllowSudo  = flag.Bool("allow-sudo", false, "允许特权命令（sudo:true）：agent 写 sudoers 放行并开启 -allow-sudo；clientd 开启转发审批")
 	flDryRun     = flag.Bool("dry-run", false, "只打印步骤，不实际安装")
 	flYes        = flag.Bool("yes", false, "跳过确认")
 	flGhBase     = flag.String("gh-base", ghBaseDefault, "二进制下载源")
@@ -110,6 +111,7 @@ type installConfig struct {
 	tlsCert    string
 	tlsKey     string
 	user       string
+	allowSudo  bool // 特权命令审批：true 才启用 sudo 通道
 }
 
 func ask(prompt, def string) string {
@@ -237,6 +239,10 @@ func wizard() (*installConfig, error) {
 			cfg.tlsKey = ask("私钥路径", "")
 		}
 		cfg.user = *flUser
+		cfg.allowSudo = *flAllowSudo
+		if interactive() && !cfg.allowSudo {
+			cfg.allowSudo = askYesNo("允许 root 提权（特权命令须用户批准后经 sudo 执行；默认拒绝）?", false)
+		}
 	case "clientd":
 		cfg.httpListen = *flHTTPListen
 		if !strings.Contains(cfg.httpListen, ":") {
@@ -264,6 +270,10 @@ func wizard() (*installConfig, error) {
 			}
 		}
 		cfg.user = *flUser
+		cfg.allowSudo = *flAllowSudo
+		if interactive() && !cfg.allowSudo {
+			cfg.allowSudo = askYesNo("允许转发特权命令（sudo:true；未开启时 AI Agent 的特权请求一律被拒）?", false)
+		}
 	case "client":
 		// 仅下载，无参数
 	default:
@@ -463,6 +473,11 @@ func printSummary(cfg *installConfig) {
 		fmt.Printf("✔ agent 已安装并启动：监听 %s（开机自启）\n", cfg.listen)
 		fmt.Printf("  设备 ID:   %s\n", cfg.id)
 		fmt.Printf("  设备 token: %s（请妥善保存，控制端需要它）\n", cfg.token)
+		if cfg.allowSudo {
+			fmt.Println("  特权命令: 已授权（sudoers 放行；客户端 exec -sudo 可提权执行，仍有用户确认闸）")
+		} else {
+			fmt.Println("  特权命令: 未授权（sudo:true 将被拒；如需 root 命令重装并选择允许提权）")
+		}
 		fmt.Println()
 		fmt.Println("  验证（任意装有 client 的机器）:")
 		fmt.Printf("    client -server ws://%s%s/ws exec -token %s 'uptime'\n", ip, cfg.listen, cfg.token)
@@ -474,6 +489,11 @@ func printSummary(cfg *installConfig) {
 	case "clientd":
 		fmt.Printf("✔ clientd 已安装并启动: http://%s（开机自启）\n", cfg.httpListen)
 		fmt.Printf("  API 密钥: %s（Authorization: Bearer %s）\n", cfg.apiKey, cfg.apiKey)
+		if cfg.allowSudo {
+			fmt.Println("  特权命令转发: 已开启（sudo:true 请求会被转发；关闭需重装）")
+		} else {
+			fmt.Println("  特权命令转发: 关闭（sudo:true 请求一律 403 approval_required，需用户批准后重装开启）")
+		}
 		fmt.Println()
 		fmt.Println("  AI Agent 调用示例:")
 		fmt.Printf("    curl -H 'Authorization: Bearer %s' -d '{\"device_id\":\"<设备ID>\",\"cmd\":\"uptime\",\"timeout_ms\":10000}' http://%s/api/v1/exec\n",

@@ -28,6 +28,45 @@ func TestBuildLinuxPlanAgentDirect(t *testing.T) {
 	if plan.unitName != "rtctl-agent" {
 		t.Errorf("unitName=%s", plan.unitName)
 	}
+	if plan.sudoers != "" {
+		t.Errorf("未授权提权时不应生成 sudoers: %s", plan.sudoers)
+	}
+}
+
+func TestBuildLinuxPlanAgentAllowSudo(t *testing.T) {
+	cfg := &installConfig{component: "agent", id: "jp-tokyo-01", listen: ":8443", token: "tok-abc", allowSudo: true}
+	plan, err := buildLinuxPlan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"-allow-sudo",
+		"NoNewPrivileges=false",
+	} {
+		if !strings.Contains(plan.unit, want) {
+			t.Errorf("unit 缺少 %q\n%s", want, plan.unit)
+		}
+	}
+	if !strings.Contains(plan.sudoers, "rtctl-agent ALL=(ALL) NOPASSWD: /bin/sh, /usr/bin/sh, /usr/bin/kill, /bin/kill") {
+		t.Errorf("sudoers 内容不对:\n%s", plan.sudoers)
+	}
+}
+
+func TestBuildLinuxPlanClientdAllowSudo(t *testing.T) {
+	cfg := &installConfig{component: "clientd", httpListen: "127.0.0.1:18080", apiKey: "key-1", allowSudo: true}
+	plan, err := buildLinuxPlan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.unit, "-allow-sudo") {
+		t.Errorf("clientd unit 应含 -allow-sudo\n%s", plan.unit)
+	}
+	if !strings.Contains(plan.unit, "NoNewPrivileges=true") {
+		t.Error("clientd 不需提权，NoNewPrivileges 应保持 true")
+	}
+	if plan.sudoers != "" {
+		t.Errorf("clientd 不应生成 sudoers: %s", plan.sudoers)
+	}
 }
 
 func TestBuildLinuxPlanClientd(t *testing.T) {

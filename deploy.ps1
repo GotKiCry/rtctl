@@ -25,6 +25,7 @@ param(
     [string]$Devices,
     [string]$HttpListen = '127.0.0.1:18080',
     [string]$ApiKey,
+    [switch]$AllowSudo,
     [string]$GhBase = 'https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin',
     [string]$GhToken
 )
@@ -107,13 +108,15 @@ $envXml    </Exec>
     schtasks /Run /TN $TaskName | Out-Null
 }
 
-function Install-Agent([string]$Listen, [string]$Id, [string]$Token) {
+function Install-Agent([string]$Listen, [string]$Id, [string]$Token, [bool]$AllowSudo) {
     if (-not $Listen -or -not $Id -or -not $Token) { throw "-Listen / -Id / -Token 必填" }
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     $bin = Get-Bin 'agent.exe'
     Copy-Item $bin (Join-Path $InstallDir 'rtctl-agent.exe') -Force
+    $args = "-listen `"$Listen`" -id `"$Id`""
+    if ($AllowSudo) { $args += ' -allow-sudo' }  # SYSTEM 已最高权限，仅为协议一致性
     Install-Task 'rtctl-agent' (Join-Path $InstallDir 'rtctl-agent.exe') `
-        "-listen `"$Listen`" -id `"$Id`"" `
+        $args `
         "rtctl agent (device $Id)" 'RTCTL_TOKEN' $Token
     $port = $Listen -replace '.*:', ''
     $ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
@@ -128,18 +131,21 @@ function Install-Agent([string]$Listen, [string]$Id, [string]$Token) {
     Write-Host "[rtctl]   以后随时查看: .\deploy.ps1 -Mode Info（菜单选 4）"
 }
 
-function Install-Clientd([string]$Devices, [string]$HttpListen, [string]$ApiKey) {
+function Install-Clientd([string]$Devices, [string]$HttpListen, [string]$ApiKey, [bool]$AllowSudo) {
     if (-not $Devices -or -not (Test-Path $Devices)) { throw "-Devices <设备清单文件> 必填（每条设备带 url 直连地址）" }
     if (-not $ApiKey) { $ApiKey = New-Token }
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     $bin = Get-Bin 'client.exe'
     Copy-Item $bin (Join-Path $InstallDir 'rtctl-client.exe') -Force
     Copy-Item $Devices (Join-Path $InstallDir 'clientd-devices.json') -Force
+    $args = "-client-id clientd serve -listen `"$HttpListen`" -devices `"$InstallDir\clientd-devices.json`" -api-key `"$ApiKey`""
+    if ($AllowSudo) { $args += ' -allow-sudo' }
     Install-Task 'rtctl-clientd' (Join-Path $InstallDir 'rtctl-client.exe') `
-        "-client-id clientd serve -listen `"$HttpListen`" -devices `"$InstallDir\clientd-devices.json`" -api-key `"$ApiKey`"" `
+        $args `
         'rtctl client service (HTTP API for AI agents)' '' ''
     Write-Host "[rtctl] ✔ clientd 已安装并启动: http://$HttpListen（后台运行 + 开机自启）"
     Write-Host "[rtctl]   API 密钥: $ApiKey（Authorization: Bearer $ApiKey）"
+    if ($AllowSudo) { Write-Host "[rtctl]   特权命令转发: 已开启" } else { Write-Host "[rtctl]   特权命令转发: 关闭（sudo:true 一律 403，需用户批准后重装开启）" }
     Write-Host "[rtctl]   测试: Invoke-RestMethod http://$HttpListen/api/v1/devices -Headers @{Authorization='Bearer $ApiKey'}"
     Write-Host "[rtctl]   以后随时查看: .\deploy.ps1 -Mode Info（菜单选 4）"
 }
@@ -161,6 +167,7 @@ function Show-Info {
         Write-Host "  设备 ID:   $id"
         Write-Host "  监听地址: $listen"
         Write-Host "  token:     $token"
+        if ($argsLine -match '-allow-sudo') { Write-Host '  特权命令: 已授权（SYSTEM 本就最高权限）' } else { Write-Host '  特权命令: 未授权（sudo:true 将被拒）' }
         Write-Host ''
         Write-Host '  ── clientd 设备清单片段（复制到控制机 devices.json 即可直连）──'
         Write-Host "  { `"devices`": [ { `"id`": `"$id`", `"url`": `"ws://$ip`:$port/ws`", `"token`": `"$token`" } ] }"
@@ -180,6 +187,7 @@ function Show-Info {
         Write-Host '  ── clientd（AI Agent 直控入口）──'
         Write-Host "  HTTP 地址: http://$hl"
         Write-Host "  API 密钥:  $ak"
+        if ($argsLine -match '-allow-sudo') { Write-Host '  特权转发: 已开启' } else { Write-Host '  特权转发: 关闭（sudo:true 一律 403 approval_required）' }
         Write-Host "  调用示例: Invoke-RestMethod http://$hl/api/v1/exec -Method Post -Headers @{Authorization='Bearer $ak'} -Body (@{device_id='<设备ID>';cmd='echo ok'} | ConvertTo-Json)"
     }
     Write-Host '===================================================='
@@ -224,8 +232,8 @@ function Update-Rtctl([string]$Comp) {
 
 # ---------- 非交互模式 ----------
 
-if ($Mode -eq 'Agent')     { Install-Agent $Listen (@($Id)[0]) $Token }
-if ($Mode -eq 'Clientd')   { Install-Clientd $Devices $HttpListen $ApiKey }
+if ($Mode -eq 'Agent')     { Install-Agent $Listen (@($Id)[0]) $Token $AllowSudo }
+if ($Mode -eq 'Clientd')   { Install-Clientd $Devices $HttpListen $ApiKey $AllowSudo }
 if ($Mode -eq 'Client')    { $bin = Get-Bin 'client.exe'; Write-Host "[rtctl] ✔ client 就绪: $bin"; Write-Host "[rtctl]   用法: $bin -server ws://<设备IP>:<端口>/ws exec -token <token> 'uptime'" }
 if ($Mode -eq 'Status')    { Show-Status }
 if ($Mode -eq 'Info')      { Show-Info }
@@ -255,7 +263,9 @@ if (-not $Mode) {
                 $p = Read-Host '监听端口 [8443]'
                 $listen = ':' + $(if ($p) { $p } else { '8443' })
                 $token = Ask-Token
-                Install-Agent $listen $id $token
+                $sy = Read-Host '允许 root 提权（SYSTEM 已最高权限，仅为协议一致性）? [y/N]'
+                $allowSudo = ($sy -eq 'y' -or $sy -eq 'Y')
+                Install-Agent $listen $id $token $allowSudo
             }
             '2' {
                 $devices = Read-Host '设备清单文件路径（每条设备带 url 直连地址）'
@@ -266,7 +276,9 @@ if (-not $Mode) {
                 $ac = Read-Host '  请选择 [1]'
                 $ak = $null
                 if ($ac -eq '2') { $ak = Read-Host '  请输入 API 密钥' }
-                Install-Clientd $devices $hl $ak
+                $sy = Read-Host '允许转发特权命令（sudo:true；未开启时一律 403）? [y/N]'
+                $allowSudo = ($sy -eq 'y' -or $sy -eq 'Y')
+                Install-Clientd $devices $hl $ak $allowSudo
             }
             '3' { Show-Status }
             '4' { Show-Info }

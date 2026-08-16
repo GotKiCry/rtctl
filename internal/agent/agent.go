@@ -22,7 +22,7 @@ import (
 )
 
 // Version agent 版本号。
-const Version = "3.0.0"
+const Version = "3.1.0"
 
 const (
 	maxConcurrentExec  = 32 // 单设备并发 exec 上限
@@ -39,6 +39,10 @@ var errSendQueueFull = errors.New("发送队列已满")
 type Agent struct {
 	ID    string
 	Token string
+
+	// AllowSudo 是否允许特权命令（sudo:true）。默认关闭：
+	// 关闭时特权请求回 sudo_disabled，需管理员在被控端显式开启（人工授权）。
+	AllowSudo bool
 
 	mu       sync.Mutex
 	execs    map[string]context.CancelFunc // exec 消息 ID -> 取消函数
@@ -148,6 +152,14 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 		sendExecOutput(sink, m.ID, "", true, 1, "exec payload 无效", proto.ErrorCodeBadPayload, false)
 		return
 	}
+	// 特权命令审批闸：sudo:true 且被控端未授权（-allow-sudo）→ 拒绝执行。
+	// Windows 例外：计划任务本身以 SYSTEM 运行，sudo 字段无提权含义，直接放行。
+	if p.Sudo && !a.AllowSudo && runtime.GOOS != "windows" {
+		sendExecOutput(sink, m.ID, "", true, 1,
+			"特权命令未获批准：被控端未开启 -allow-sudo（需管理员在被控端运行安装脚本并选择允许提权）",
+			proto.ErrorCodeSudoDisabled, false)
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	if p.TimeoutMS > 0 {
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(p.TimeoutMS)*time.Millisecond)
@@ -162,8 +174,16 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 		a.mu.Unlock()
 	}()
 
-	argv, sysProc := shellExecArgs(p.Cmd)
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	argv, sysProc := shellExecArgs(p.Cmd, p.Sudo)
+	// sudo 路径不能用 CommandContext：ctx 取消时它会抢先杀掉直接子进程 sudo，
+	// 而 sudo 已把 /bin/sh 与孙进程放进新会话/进程组，剩下的树会漏杀。
+	// 这里用普通 exec.Command，由下方 kill goroutine 统一经 /proc 遍历杀整树。
+	var cmd *exec.Cmd
+	if p.Sudo && runtime.GOOS == "linux" {
+		cmd = exec.Command(argv[0], argv[1:]...)
+	} else {
+		cmd = exec.CommandContext(ctx, argv[0], argv[1:]...)
+	}
 	if sysProc != nil {
 		cmd.SysProcAttr = sysProc
 	}
@@ -190,7 +210,8 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 	go func() {
 		<-ctx.Done()
 		if ctx.Err() != nil {
-			killProcessTree(cmd)
+			log.Printf("[agent] exec 超时/取消，杀进程树 sudo=%v cmd=%s", p.Sudo, p.Cmd)
+			killProcessTree(cmd, p.Sudo)
 		}
 	}()
 	waitCh := make(chan error, 1)
@@ -198,17 +219,25 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 		waitCh <- cmd.Wait()
 		pw.Close()
 	}()
-	log.Printf("[agent] exec 开始: %s", p.Cmd)
+	if p.Sudo {
+		log.Printf("[agent] exec 开始(SUDO): %s", p.Cmd)
+	} else {
+		log.Printf("[agent] exec 开始: %s", p.Cmd)
+	}
 
 	buf := make([]byte, 32*1024)
 	seq := 0
 	truncated := false
+	var head []byte // 输出开头（用于 sudo 失败识别，最多 4KB）
 	for ctx.Err() == nil {
 		n, rerr := pr.Read(buf)
 		if n > 0 {
 			data := buf[:n]
 			if runtime.GOOS == "windows" {
 				data = decodeConsoleOutput(data)
+			}
+			if len(head) < 4096 {
+				head = append(head, data...)
 			}
 			if err := sendExecOutput(sink, m.ID, string(data), false, 0, "", "", false); err != nil {
 				truncated = true // 背压丢帧：在 done 帧上打截断标记
@@ -243,6 +272,9 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 		errStr, errCode = "执行超时", proto.ErrorCodeTimeout
 	case ctx.Err() == context.Canceled:
 		errStr, errCode = "已被取消", proto.ErrorCodeKilled
+	case p.Sudo && exitCode == 1 && sudoFailureMark(string(head)):
+		// sudo -n 失败（sudoers 未放行 / NNP 阻挡 / 密码缺失）→ 机器可读错误码
+		errStr, errCode = "sudo 执行失败：sudoers 未放行 rtctl-agent（需在被控端安装时选择允许提权）", proto.ErrorCodeSudoDenied
 	}
 	// done 帧必须可靠送达：阻塞发送，失败则断开对应连接
 	if err := sendExecOutputBlocking(sink, m.ID, true, exitCode, errStr, errCode, truncated); err != nil {
@@ -255,6 +287,21 @@ func sendExecOutput(sink sendSink, id, data string, done bool, exitCode int, err
 	out, _ := proto.WithPayload(proto.Msg{Type: proto.TypeExecOutput, ID: id},
 		proto.ExecOutputPayload{Data: data, Done: done, ExitCode: exitCode, Error: errStr, ErrorCode: errCode, Truncated: truncated})
 	return sink.Send(out)
+}
+
+// sudoFailureMark 判断输出开头是否为 sudo -n 的典型失败信息。
+func sudoFailureMark(head string) bool {
+	for _, m := range []string{
+		"a password is required",
+		"not allowed to run sudo",
+		"no new privileges",
+		"sudoers",
+	} {
+		if strings.Contains(head, m) {
+			return true
+		}
+	}
+	return false
 }
 
 func sendExecOutputBlocking(sink sendSink, id string, done bool, exitCode int, errStr, errCode string, truncated bool) error {

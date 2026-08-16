@@ -78,7 +78,8 @@ func (s *pipeSession) Close() error {
 // killProcessTree Windows 上终止整个进程树：
 // TerminateProcess 只杀直接子进程，孙进程会存活并继续持有输出管道，
 // 因此用 taskkill /T 级联终止。
-func killProcessTree(cmd *exec.Cmd) {
+// sudo 参数忽略：计划任务以 SYSTEM 运行，本就拥有全部权限。
+func killProcessTree(cmd *exec.Cmd, sudo bool) {
 	if cmd.Process == nil {
 		return
 	}

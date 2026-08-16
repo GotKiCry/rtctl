@@ -148,6 +148,19 @@
 | bad_device | 未知设备 ID（clientd 配置中不存在） | 检查设备清单 |
 | connection_lost | 与设备的连接断开 | 稍后重试 |
 | internal | 内部错误 | 上报 |
+| sudo_disabled | 特权命令被拒：被控端 agent 未开 -allow-sudo | 上报人类，由管理员在被控端授权后重试 |
+| sudo_denied | sudo 执行失败：sudoers 未放行（或密码缺失/NNP 阻挡） | 上报人类，检查被控端 sudoers |
+| approval_required | 特权命令未获用户批准：clientd 未开 -allow-sudo（HTTP 403） | 征得用户同意后由用户在控制端开启 |
+
+### 6.2a 特权命令（sudo）审批模型
+
+- `exec` 载荷带 `sudo:true` 表示请求 root 提权执行。**三道闸，缺一不可**：
+  1. **被控端授权**（agent `-allow-sudo`，安装时由管理员选择；默认关）——未开回 `sudo_disabled`；
+  2. **控制端批准**（clientd `-allow-sudo`；CLI 交互下 y/N 当面确认，非交互须显式 `-confirm-sudo`）——clientd 未开回 HTTP 403 `approval_required`；
+  3. **sudoers 放行**（`rtctl-agent ALL=(ALL) NOPASSWD: /bin/sh, /usr/bin/sh, /usr/bin/kill, /bin/kill`，按命令路径最小授权）——失败回 `sudo_denied`。
+- 设备端执行：`sudo -n -- /bin/sh -c <cmd>`；agent 保持低权限用户运行，仅该条命令提权（与"agent 整体跑 root"相比保留了纵深防御）。
+- **版本门槛**：`sudo:true` 需 agent ≥ 3.1.0。旧 agent（3.0.x）不认识该字段，会**静默按低权限执行**——调用方必须先 `list` 确认设备版本 ≥ 3.1.0 再发特权请求。
+- 审计：agent 与 clientd 的日志对特权命令打 `(SUDO)` 标记。
 
 ### 6.3 超时语义
 
@@ -168,13 +181,16 @@
 | agent | -id / -token | — | 设备身份（或环境变量 RTCTL_ID / RTCTL_TOKEN） |
 | agent | -tls-cert / -tls-key | 空 | 启用 WSS（必须同时提供） |
 | agent | -allow-any-origin | false | 放行任意 Origin（Web 接入用） |
+| agent | -allow-sudo | false | 允许特权命令（sudo:true 经 sudo 提权；安装器同时写 sudoers 并放开 NoNewPrivileges） |
 | client | -server | ws://127.0.0.1:8443/ws | 设备直连地址 |
 | client | -client-id | 空 | 操作者/Agent 标识（审计归因） |
 | client | -json | false | 结构化输出（list / exec） |
 | client exec | -timeout / -workdir / -stdin-file / -c | — | 执行选项 |
+| client exec | -sudo / -confirm-sudo | false | 特权命令 + 非交互确认（交互下 y/N 当面确认） |
 | client serve | -listen | 127.0.0.1:18080 | HTTP 监听地址 |
 | client serve | -devices | devices.json | 设备清单（device_id -> token+url） |
 | client serve | -api-key | 空 | API 密钥（留空自动生成并打印） |
+| client serve | -allow-sudo | false | 特权命令转发闸（开才转发 sudo:true，否则 403 approval_required） |
 
 ## 8. 目录结构
 
@@ -221,3 +237,4 @@ client -server ws://jp服务器IP:8443/ws file-get -token <token> /var/log/app.l
 2. 生产建议启用 WSS（`-tls-cert/-tls-key`），否则 token 与指令内容明文传输。
 3. 默认拒绝跨源 Origin；给 AI Agent 使用时建议在 agent 侧以最小权限账户运行。
 4. 本系统等同远程 shell 的能力：只应在可信网络/设备上使用，不要部署到不信任的设备。
+5. 特权命令（sudo）默认全链路拒绝：被控端 `-allow-sudo`、控制端 `-allow-sudo`、sudoers 放行三道闸都必须由人显式打开；AI Agent 无权自行解除（6.2a）。

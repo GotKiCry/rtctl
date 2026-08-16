@@ -3,7 +3,7 @@
 // 用法:
 //
 //	rtctl-client [全局参数] list
-//	rtctl-client [全局参数] exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-c 命令 | 命令...]
+//	rtctl-client [全局参数] exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-sudo] [-confirm-sudo] [-c 命令 | 命令...]
 //	rtctl-client [全局参数] shell -token <设备token>
 //
 // 全局参数（必须放在子命令之前）:
@@ -14,6 +14,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -90,7 +91,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, "rtctl-client - 远程终端控制端\n\n用法:\n  rtctl-client [全局参数] list\n  rtctl-client [全局参数] exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-c 命令 | 命令...]\n  rtctl-client [全局参数] shell -token <设备token>\n  rtctl-client [全局参数] file-put -token <设备token> [-mode 0644] <本地文件> <远端路径>\n  rtctl-client [全局参数] file-get -token <设备token> <远端路径> <本地文件>\n  rtctl-client [全局参数] serve -listen 127.0.0.1:18080 -devices devices.json [-api-key K]\n\n全局参数:\n  -server    设备地址（agent 直连地址，默认 ws://127.0.0.1:8443/ws）\n  -client-id 操作者/Agent 标识（审计归因）\n  -json      结构化输出（list / exec 生效）\n")
+	fmt.Fprint(os.Stderr, "rtctl-client - 远程终端控制端\n\n用法:\n  rtctl-client [全局参数] list\n  rtctl-client [全局参数] exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-sudo] [-confirm-sudo] [-c 命令 | 命令...]\n  rtctl-client [全局参数] shell -token <设备token>\n  rtctl-client [全局参数] file-put -token <设备token> [-mode 0644] <本地文件> <远端路径>\n  rtctl-client [全局参数] file-get -token <设备token> <远端路径> <本地文件>\n  rtctl-client [全局参数] serve -listen 127.0.0.1:18080 -devices devices.json [-api-key K] [-allow-sudo]\n\n全局参数:\n  -server    设备地址（agent 直连地址，默认 ws://127.0.0.1:8443/ws）\n  -client-id 操作者/Agent 标识（审计归因）\n  -json      结构化输出（list / exec 生效）\n\n特权命令（-sudo）:\n  需被控端 agent 开启 -allow-sudo（安装时由管理员授权）；交互下 CLI 会向用户当面确认，\n  非交互（AI Agent / 管道）须显式 -confirm-sudo 或经 clientd（-allow-sudo 审批闸）。\n")
 }
 
 func printJSONError(err error) {
@@ -177,10 +178,12 @@ func cmdExec(args []string) error {
 	workdir := sub.String("workdir", "", "工作目录")
 	stdinFile := sub.String("stdin-file", "", "写入命令 stdin 的文件")
 	rawCmd := sub.String("c", "", "原样命令字符串（不再拼接参数）")
+	sudo := sub.Bool("sudo", false, "请求 root 提权执行（需被控端已开启 -allow-sudo；交互下会向用户确认）")
+	confirmSudo := sub.Bool("confirm-sudo", false, "非交互场景下确认特权命令（等价于用户批准）")
 	sub.Parse(args)
 	rest := sub.Args()
 	if *token == "" || (*rawCmd == "" && len(rest) == 0) {
-		fmt.Fprintln(os.Stderr, "用法: rtctl-client exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-c 命令 | 命令...]")
+		fmt.Fprintln(os.Stderr, "用法: rtctl-client exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-sudo] [-confirm-sudo] [-c 命令 | 命令...]")
 		os.Exit(2)
 	}
 	var cmdStr string
@@ -188,6 +191,19 @@ func cmdExec(args []string) error {
 		cmdStr = *rawCmd
 	} else {
 		cmdStr = strings.Join(rest, " ")
+	}
+	// 特权命令审批：交互终端向用户当面确认；非交互（Agent/管道）必须显式 -confirm-sudo
+	if *sudo && !*confirmSudo {
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			return errors.New("特权命令需要用户批准：交互运行确认提示，或显式加 -confirm-sudo")
+		}
+		fmt.Printf("⚠ 此命令将以 root 提权执行: %s\n确认？[y/N] ", cmdStr)
+		reader := bufio.NewReader(os.Stdin)
+		line, _ := reader.ReadString('\n')
+		line = strings.TrimSpace(strings.ToLower(line))
+		if line != "y" && line != "yes" {
+			return errors.New("用户取消特权命令")
+		}
 	}
 	var stdinData string
 	if *stdinFile != "" {
@@ -206,7 +222,7 @@ func cmdExec(args []string) error {
 
 	execID := idutil.New()
 	m := proto.Msg{Type: proto.TypeExec, Token: *token, ID: execID}
-	m, err = proto.WithPayload(m, proto.ExecPayload{Cmd: cmdStr, TimeoutMS: *timeoutMS, Workdir: *workdir, Stdin: stdinData})
+	m, err = proto.WithPayload(m, proto.ExecPayload{Cmd: cmdStr, TimeoutMS: *timeoutMS, Workdir: *workdir, Stdin: stdinData, Sudo: *sudo})
 	if err != nil {
 		return err
 	}

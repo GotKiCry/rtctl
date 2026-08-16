@@ -77,7 +77,7 @@ irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.ps1 -OutFile de
 .\deploy.ps1
 ```
 
-菜单选项：`[1] 安装 agent`（被控端）· `[2] 安装 clientd`（AI Agent 直控服务）· `[3] 查看状态（运行+开机自启）` · `[4] 查看连接信息（复制 token/设备清单/验证命令）` · `[5] 升级` · `[6] 卸载` · `[7] 退出`。
+菜单选项：`[1] 安装 agent`（被控端）· `[2] 安装 clientd`（AI Agent 直控服务）· `[3] 查看状态（运行+开机自启）` · `[4] 查看连接信息（复制 token/设备清单/验证命令）` · `[5] 升级` · `[6] 卸载` · `[7] 退出`。安装 agent/clientd 时都会问**是否允许 root 提权**（默认否）。
 
 装完会**当场打印可复制的连接信息**；之后任何时间可用 `bash deploy.sh info`（Linux）或 `.\deploy.ps1 -Mode Info`（Windows）重新查看（无需 root）。
 
@@ -92,6 +92,23 @@ chmod +x rtctl-wizard && ./rtctl-wizard        # Linux 非 root 自动提权
 ```
 
 脚本化部署（`deploy.sh agent --listen :8443 --id X --token T` 等）仍可用，详见 [deploy/README.md](deploy/README.md)。
+
+## 特权命令（root）审批
+
+agent 默认以低权限账户运行，root 命令（如 `docker ps`）默认**全链路拒绝**。要执行特权命令，三道闸必须全部由人显式打开：
+
+1. **被控端授权**：安装 agent 时选"允许 root 提权"（`deploy.sh agent ... --allow-sudo` / 向导同款选项）→ 自动写 sudoers 最小放行 + 开启 `-allow-sudo`；
+2. **控制端批准**：CLI `client exec -sudo 'docker ps'`（交互下 y/N 当面确认；非交互加 `-confirm-sudo`）；AI Agent 走 clientd 时，需用户在控制端以 `--allow-sudo` 装 clientd，否则特权请求一律 403 `approval_required`；
+3. **sudoers 放行**：`rtctl-agent ALL=(ALL) NOPASSWD: /bin/sh, /usr/bin/sh, /usr/bin/kill, /bin/kill`（仅 agent 提权所需的最小命令集，卸载自动删除）。
+
+```bash
+client -server ws://<设备IP>:8443/ws exec -token <token> -sudo 'docker ps'   # 交互确认后以 root 执行
+bash deploy.sh info   # 随时查看当前 特权命令 授权状态（菜单选 4）
+```
+
+- 失败语义：未授权 → `sudo_disabled`；sudoers 不匹配 → `sudo_denied`；clientd 未批准 → `approval_required`。
+- 版本门槛：需 agent ≥ 3.1.0；旧 agent 不认识 sudo 字段会按低权限执行，调用前先 `list` 确认版本。
+- 超时/取消会以 root 杀整棵进程树（sudo 会为新会话，agent 经 /proc 遍历后代逐一终止）。
 
 ## 安全
 

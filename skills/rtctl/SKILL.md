@@ -80,6 +80,8 @@ rtctl/
 - **Windows 输出编码**：中文系统 cmd 输出是 GBK；agent 侧启发式转码（UTF-8 有效则原样，否则 GBK 解码），分片边界切开多字节字符时该片回退原样——接受该不完美性。
 - **安装器二进制命名**：文件名不要含 install/setup/update/patch——Windows 安装器启发式会对这类名字强制提权/拦截（实测）。当前命名 `rtctl-wizard`。
 - **部署信息可复现**：装完当场打印连接信息（ID/地址/token/devices.json 片段/验证命令）；之后 `bash deploy.sh info`（菜单 4，无需 root）/ `rtctl-wizard info` / `deploy.ps1 -Mode Info` 重新查看。信息从 systemd unit（`systemctl cat` 的 ExecStart/Environment 行）或计划任务 XML 提取，不是存储新文件。
+- **特权命令（sudo）三道闸**：① agent `-allow-sudo`（装时选允许提权，写 sudoers 最小放行 `/bin/sh /usr/bin/sh /usr/bin/kill /bin/kill` + NoNewPrivileges=false）；② CLI `-sudo`（TTY y/N 确认；非交互必须 `-confirm-sudo`）/ clientd `-allow-sudo`（否则 403 `approval_required`）；③ sudoers 匹配。错误码 `sudo_disabled` / `sudo_denied` / `approval_required`。旧 agent（<3.1.0）不认识 sudo 字段会**静默按低权限执行**——发特权请求前先 `list` 看版本。
+- **sudo 执行不能用 CommandContext 杀树**：sudo 会为目标命令新建会话/进程组，且 ctx 取消时 CommandContext 抢先杀掉的只是 sudo 直接子进程——两者叠加导致孙进程全漏杀。sudo 路径用普通 `exec.Command`，杀树时经 `/proc/<pid>/stat` 的 ppid BFS 收集全部后代（含 sudo 自身），再 `sudo -n /bin/sh -c 'kill -KILL <pids...>'` 一次杀光（实测 timeout 1.5s → 1.6s 返回、无孤儿）。
 - `-race` 构建在 Windows 需要 cgo（gcc）；本机没有时改用功能性测试替代。
 
 ## 修改检查清单

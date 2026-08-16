@@ -38,6 +38,11 @@ func printInfoLinux() {
 		fmt.Printf("  设备 ID:   %s\n", id)
 		fmt.Printf("  监听地址: %s\n", listen)
 		fmt.Printf("  token:     %s\n", token)
+		if strings.Contains(execLine, "-allow-sudo") {
+			fmt.Println("  特权命令: 已授权（控制端 exec -sudo 可提权执行）")
+		} else {
+			fmt.Println("  特权命令: 未授权（sudo:true 将被拒；需 root 命令请重装并选允许提权）")
+		}
 		fmt.Println()
 		fmt.Println("  ── clientd 设备清单片段（复制到控制机 devices.json 即可直连）──")
 		fmt.Printf("  { \"devices\": [ { \"id\": %q, \"url\": \"ws://%s%s/ws\", \"token\": %q } ] }\n", id, ip, port, token)
@@ -55,6 +60,11 @@ func printInfoLinux() {
 		fmt.Println("  ── clientd（AI Agent 直控入口）──")
 		fmt.Printf("  HTTP 地址: http://%s\n", hl)
 		fmt.Printf("  API 密钥:  %s\n", ak)
+		if strings.Contains(cd, "-allow-sudo") {
+			fmt.Println("  特权转发: 已开启（sudo:true 请求会被转发）")
+		} else {
+			fmt.Println("  特权转发: 关闭（sudo:true 请求一律 403 approval_required）")
+		}
 		fmt.Printf("  调用示例: curl -H 'Authorization: Bearer %s' -d '{\"device_id\":\"<设备ID>\",\"cmd\":\"uptime\"}' http://%s/api/v1/exec\n", ak, hl)
 	}
 }
@@ -75,6 +85,11 @@ func printInfoWindows() {
 		fmt.Printf("  设备 ID:   %s\n", id)
 		fmt.Printf("  监听地址: %s\n", listen)
 		fmt.Printf("  token:     %s\n", token)
+		if strings.Contains(args, "-allow-sudo") {
+			fmt.Println("  特权命令: 已授权（SYSTEM 本就最高权限）")
+		} else {
+			fmt.Println("  特权命令: 未授权（sudo:true 将被拒）")
+		}
 		fmt.Println()
 		fmt.Println("  ── clientd 设备清单片段（复制到控制机 devices.json 即可直连）──")
 		fmt.Printf("  { \"devices\": [ { \"id\": %q, \"url\": \"ws://%s%s/ws\", \"token\": %q } ] }\n", id, ip, port, token)

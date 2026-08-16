@@ -107,15 +107,16 @@ ask_token() { # 交互式 token 引导：自动生成或手动输入（提示走
 # ---------- 安装: agent ----------
 
 cmd_agent() {
-  local id="" token="" run_user="rtctl-agent" listen="" tls_cert="" tls_key=""
+  local id="" token="" run_user="rtctl-agent" listen="" tls_cert="" tls_key="" allow_sudo=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --listen)     listen="$2"; shift 2 ;;
-      --tls-cert)   tls_cert="$2"; shift 2 ;;
-      --tls-key)    tls_key="$2"; shift 2 ;;
-      --id)         id="$2"; shift 2 ;;
-      --token)      token="$2"; shift 2 ;;
-      --user)       run_user="$2"; shift 2 ;;
+      --listen)      listen="$2"; shift 2 ;;
+      --tls-cert)    tls_cert="$2"; shift 2 ;;
+      --tls-key)     tls_key="$2"; shift 2 ;;
+      --id)          id="$2"; shift 2 ;;
+      --token)       token="$2"; shift 2 ;;
+      --user)        run_user="$2"; shift 2 ;;
+      --allow-sudo)  allow_sudo="1"; shift ;;
       *) fail "未知参数: $1" ;;
     esac
   done
@@ -135,6 +136,21 @@ cmd_agent() {
   local exec_args="-listen $listen"
   [[ -n "$tls_cert" ]] && exec_args+=" -tls-cert $tls_cert -tls-key $tls_key"
   exec_args+=" -id $id"
+  # 特权命令审批：sudo 是 setuid 程序，NoNewPrivileges=true 会阻止提权，
+  # 因此仅当用户批准 --allow-sudo 时才放开并写 sudoers（按命令路径最小放行）。
+  local nnp="true"
+  if [[ -n "$allow_sudo" ]]; then
+    exec_args+=" -allow-sudo"
+    nnp="false"
+    cat > /etc/sudoers.d/rtctl-agent <<EOF
+# rtctl agent 提权通道（由 deploy.sh 生成；卸载或重装为不授权时自动删除）
+$run_user ALL=(ALL) NOPASSWD: /bin/sh, /usr/bin/sh, /usr/bin/kill, /bin/kill
+EOF
+    chmod 440 /etc/sudoers.d/rtctl-agent
+    visudo -c -f /etc/sudoers.d/rtctl-agent >/dev/null 2>&1 || { rm -f /etc/sudoers.d/rtctl-agent; fail "sudoers 校验失败"; }
+  else
+    rm -f /etc/sudoers.d/rtctl-agent
+  fi
 
   cat > /etc/systemd/system/rtctl-agent.service <<EOF
 [Unit]
@@ -148,7 +164,7 @@ Environment=RTCTL_TOKEN=$token
 ExecStart=/usr/local/bin/rtctl-agent $exec_args
 Restart=always
 RestartSec=3
-NoNewPrivileges=true
+NoNewPrivileges=$nnp
 
 [Install]
 WantedBy=multi-user.target
@@ -162,6 +178,11 @@ EOF
   ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   [[ -n "$ip" ]] || ip="<本机IP>"
   log "✔ agent ($id) 已安装并启动：监听 $listen（后台运行 + 开机自启，低权限用户 $run_user）"
+  if [[ -n "$allow_sudo" ]]; then
+    log "  特权命令: 已授权（sudoers 放行；控制端 exec -sudo 仍需用户确认/批准闸）"
+  else
+    log "  特权命令: 未授权（sudo:true 将被拒；需要 root 命令就重装并选允许提权）"
+  fi
   log "  验证: client -server ws://$ip:$port/ws exec -token $token 'uptime'"
   log "  clientd 设备清单片段:"
   log "    { \"devices\": [ { \"id\": \"$id\", \"url\": \"ws://$ip:$port/ws\", \"token\": \"$token\" } ] }"
@@ -171,13 +192,14 @@ EOF
 # ---------- 安装: clientd ----------
 
 cmd_clientd() {
-  local devices="" listen="127.0.0.1:18080" api_key="" run_user="rtctl"
+  local devices="" listen="127.0.0.1:18080" api_key="" run_user="rtctl" allow_sudo=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --devices)    devices="$2"; shift 2 ;;
-      --listen)     listen="$2"; shift 2 ;;
-      --api-key)    api_key="$2"; shift 2 ;;
-      --user)       run_user="$2"; shift 2 ;;
+      --devices)     devices="$2"; shift 2 ;;
+      --listen)      listen="$2"; shift 2 ;;
+      --api-key)     api_key="$2"; shift 2 ;;
+      --user)        run_user="$2"; shift 2 ;;
+      --allow-sudo)  allow_sudo="1"; shift ;;
       *) fail "未知参数: $1" ;;
     esac
   done
@@ -194,6 +216,10 @@ cmd_clientd() {
   chmod 600 /etc/rtctl/clientd-devices.json
   chown "$run_user" /etc/rtctl/clientd-devices.json
 
+  local exec_line="/usr/local/bin/rtctl-client -client-id clientd serve -listen $listen -devices /etc/rtctl/clientd-devices.json -api-key \"$api_key\""
+  # 特权命令转发闸：仅用户批准后开启（未开启时 AI Agent 的特权请求一律 403）
+  [[ -n "$allow_sudo" ]] && exec_line+=" -allow-sudo"
+
   cat > /etc/systemd/system/rtctl-clientd.service <<EOF
 [Unit]
 Description=rtctl client service (HTTP API for AI agents)
@@ -202,7 +228,7 @@ Wants=network-online.target
 
 [Service]
 User=$run_user
-ExecStart=/usr/local/bin/rtctl-client -client-id clientd serve -listen $listen -devices /etc/rtctl/clientd-devices.json -api-key "$api_key"
+ExecStart=$exec_line
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
@@ -217,6 +243,11 @@ EOF
 
   log "✔ clientd 已安装并启动：http://$listen（后台运行 + 开机自启）"
   log "  API 密钥: $api_key（Authorization: Bearer $api_key）"
+  if [[ -n "$allow_sudo" ]]; then
+    log "  特权命令转发: 已开启（sudo:true 请求会被转发）"
+  else
+    log "  特权命令转发: 关闭（sudo:true 请求一律 403，需用户批准后重装开启）"
+  fi
   log "  测试: curl -H 'Authorization: Bearer $api_key' http://$listen/api/v1/devices"
   log "  以后随时查看以上信息: bash deploy.sh info（菜单选 4）"
 }
@@ -260,6 +291,11 @@ cmd_info() {
     echo -e "  ${C_GREEN}设备 ID:${C_NC}   $id"
     echo -e "  ${C_GREEN}监听地址:${C_NC} $listen"
     echo -e "  ${C_GREEN}token:${C_NC}     $token"
+    if echo "$exec_line" | grep -q -- '-allow-sudo'; then
+      echo -e "  ${C_GREEN}特权命令:${C_NC} 已授权（控制端 exec -sudo 可提权执行）"
+    else
+      echo -e "  ${C_GREEN}特权命令:${C_NC} 未授权（sudo:true 将被拒；需 root 命令请重装并选允许提权）"
+    fi
     echo
     echo -e "  ${C_YELLOW}── clientd 设备清单片段（复制到控制机 devices.json 即可直连）──${C_NC}"
     echo "  { \"devices\": [ { \"id\": \"$id\", \"url\": \"ws://$ip:$port/ws\", \"token\": \"$token\" } ] }"
@@ -271,13 +307,19 @@ cmd_info() {
   fi
 
   if systemctl cat rtctl-clientd >/dev/null 2>&1; then
-    local hl api_key
-    hl="$(systemctl cat rtctl-clientd 2>/dev/null | grep '^ExecStart=' | head -1 | grep -o '\-listen [^ ]*' | awk '{print $2}' | tr -d '"')"
-    api_key="$(systemctl cat rtctl-clientd 2>/dev/null | grep '^ExecStart=' | head -1 | grep -o '\-api-key [^ ]*' | awk '{print $2}' | tr -d '"')"
+    local hl api_key cd_exec
+    cd_exec="$(systemctl cat rtctl-clientd 2>/dev/null | grep '^ExecStart=' | head -1)"
+    hl="$(echo "$cd_exec" | grep -o '\-listen [^ ]*' | awk '{print $2}' | tr -d '"')"
+    api_key="$(echo "$cd_exec" | grep -o '\-api-key [^ ]*' | awk '{print $2}' | tr -d '"')"
     echo
     echo -e "  ${C_GREEN}── clientd（AI Agent 直控入口）──${C_NC}"
     echo -e "  ${C_GREEN}HTTP 地址:${C_NC} http://$hl"
     echo -e "  ${C_GREEN}API 密钥:${C_NC}  $api_key"
+    if echo "$cd_exec" | grep -q -- '-allow-sudo'; then
+      echo -e "  ${C_GREEN}特权转发:${C_NC} 已开启（sudo:true 请求会被转发）"
+    else
+      echo -e "  ${C_GREEN}特权转发:${C_NC} 关闭（sudo:true 请求一律 403 approval_required）"
+    fi
     echo "  调用示例: curl -H 'Authorization: Bearer $api_key' -d '{\"device_id\":\"<设备ID>\",\"cmd\":\"uptime\"}' http://$hl/api/v1/exec"
   fi
   echo -e "${C_CYAN}====================================================${C_NC}"
@@ -302,7 +344,7 @@ cmd_uninstall() {
     systemctl disable --now "$unit" 2>/dev/null || true
     rm -f "/etc/systemd/system/$unit.service"
     case "$c" in
-      agent)   rm -f /usr/local/bin/rtctl-agent /etc/rtctl/agent.token ;;
+      agent)   rm -f /usr/local/bin/rtctl-agent /etc/rtctl/agent.token /etc/sudoers.d/rtctl-agent ;;
       clientd) rm -f /usr/local/bin/rtctl-client /etc/rtctl/clientd-devices.json ;;
     esac
     log "✔ $c 已卸载"
@@ -333,7 +375,7 @@ cmd_update() {
 
 menu_agent() {
   echo -e "${C_CYAN}== 安装 agent（被控端：装在目标服务器上，被控制）==${C_NC}"
-  local id listen token tls_yn tls_cert tls_key
+  local id listen token tls_yn tls_cert tls_key sudo_yn sudo_args
   read -rp "设备 ID（唯一名称，如 jp-tokyo-01）: " id
   [[ -n "$id" ]] || { warn "设备 ID 不能为空"; return; }
   read -rp "监听端口 [8443]: " p
@@ -344,13 +386,15 @@ menu_agent() {
     read -rp "证书路径: " tls_cert
     read -rp "私钥路径: " tls_key
   fi
+  read -rp "允许 root 提权（特权命令须用户批准后经 sudo 执行）? [y/N]: " sudo_yn
+  [[ "${sudo_yn,,}" == "y" ]] && sudo_args="--allow-sudo"
   cmd_agent --listen "$listen" --id "$id" --token "$token" \
-    ${tls_cert:+--tls-cert "$tls_cert" --tls-key "$tls_key"}
+    ${tls_cert:+--tls-cert "$tls_cert" --tls-key "$tls_key"} $sudo_args
 }
 
 menu_clientd() {
   echo -e "${C_CYAN}== 安装 clientd（AI Agent 直控服务：装在操作机上）==${C_NC}"
-  local devices listen api_choice api_key
+  local devices listen api_choice api_key sudo_yn sudo_args
   read -rp "设备清单文件路径（每条设备带 url 直连地址）: " devices
   [[ -f "$devices" ]] || { warn "文件不存在: $devices"; return; }
   read -rp "HTTP 监听地址 [127.0.0.1:18080]: " l
@@ -358,7 +402,9 @@ menu_clientd() {
   echo -e "  ${C_CYAN}API 密钥:${C_NC} [1] 自动生成（推荐） [2] 手动输入"
   read -rp "  请选择 [1]: " api_choice
   if [[ "${api_choice:-1}" == "2" ]]; then read -rp "  请输入 API 密钥: " api_key; fi
-  cmd_clientd --devices "$devices" --listen "$listen" ${api_key:+--api-key "$api_key"}
+  read -rp "允许转发特权命令（sudo:true；未开启时 AI Agent 的特权请求一律被拒）? [y/N]: " sudo_yn
+  [[ "${sudo_yn,,}" == "y" ]] && sudo_args="--allow-sudo"
+  cmd_clientd --devices "$devices" --listen "$listen" ${api_key:+--api-key "$api_key"} $sudo_args
 }
 
 menu() {
