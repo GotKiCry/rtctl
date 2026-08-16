@@ -293,10 +293,11 @@ cmd_info() {
     listen="$(echo "$exec_line" | grep -o '\-listen [^ ]*' | awk '{print $2}' | tr -d '"')"
     id="$(echo "$exec_line" | grep -o '\-id [^ ]*' | awk '{print $2}' | tr -d '"')"
     # 新版：0600 的 EnvironmentFile（非 root 读不到）；旧版兼容：unit 内联 Environment=
+    # 注意 grep 无匹配会 exit 1，pipefail+set -e 下必须兜底
     if [[ -r /etc/rtctl/agent.env ]]; then
-      token="$(grep '^RTCTL_TOKEN=' /etc/rtctl/agent.env | head -1 | cut -d= -f2-)"
+      token="$(grep '^RTCTL_TOKEN=' /etc/rtctl/agent.env | head -1 | cut -d= -f2- || true)"
     else
-      token="$(echo "$unit_text" | grep '^Environment=RTCTL_TOKEN=' | head -1 | sed 's/^Environment=RTCTL_TOKEN=//' | tr -d '"')"
+      token="$(echo "$unit_text" | grep '^Environment=RTCTL_TOKEN=' | head -1 | sed 's/^Environment=RTCTL_TOKEN=//' | tr -d '"' || true)"
     fi
     [[ -n "$token" ]] || token='(token 存于 /etc/rtctl/agent.env，0600 需 root 查看)'
     port="${listen##*:}"
@@ -326,9 +327,9 @@ cmd_info() {
     cd_exec="$(systemctl cat rtctl-clientd 2>/dev/null | grep '^ExecStart=' | head -1)"
     hl="$(echo "$cd_exec" | grep -o '\-listen [^ ]*' | awk '{print $2}' | tr -d '"')"
     if [[ -r /etc/rtctl/clientd.env ]]; then
-      api_key="$(grep '^RTCTL_API_KEY=' /etc/rtctl/clientd.env | head -1 | cut -d= -f2-)"
+      api_key="$(grep '^RTCTL_API_KEY=' /etc/rtctl/clientd.env | head -1 | cut -d= -f2- || true)"
     else
-      api_key="$(echo "$cd_exec" | grep -o '\-api-key [^ ]*' | awk '{print $2}' | tr -d '"')"
+      api_key="$(echo "$cd_exec" | grep -o '\-api-key [^ ]*' | awk '{print $2}' | tr -d '"' || true)"
     fi
     [[ -n "$api_key" ]] || api_key='(存于 /etc/rtctl/clientd.env，0600 需 root 查看)'
     echo
