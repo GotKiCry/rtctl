@@ -55,7 +55,7 @@ CLI 也可直连：`./bin/client -server ws://jp服务器IP:8443/ws exec -token 
 | `POST /api/v1/files/upload` | `{"device_id","path","data"(base64),"mode"}` → `{"ok","size"}` |
 | `POST /api/v1/files/download` | `{"device_id","path"}` → `{"ok","size","data"(base64)}` |
 
-- 认证：`Authorization: Bearer <api-key>`（`-api-key` 不传自动生成并打印）
+- 认证：`Authorization: Bearer <api-key>`（`-api-key` 不传则读环境变量 `RTCTL_API_KEY`，再为空自动生成并打印）
 - 设备寻址用 `device_id`，token 只存在于 clientd 的本地设备清单——Agent 永远不接触 token
 - 调用方超时/断开会自动取消远端命令；连接失败回 `connection_lost`
 
@@ -79,7 +79,7 @@ irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.ps1 -OutFile de
 
 菜单选项：`[1] 安装 agent`（被控端）· `[2] 安装 clientd`（AI Agent 直控服务）· `[3] 查看状态（运行+开机自启）` · `[4] 查看连接信息（复制 token/设备清单/验证命令）` · `[5] 升级` · `[6] 卸载` · `[7] 退出`。安装 agent/clientd 时都会问**是否允许 root 提权**（默认否）。
 
-装完会**当场打印可复制的连接信息**；之后任何时间可用 `bash deploy.sh info`（Linux）或 `.\deploy.ps1 -Mode Info`（Windows）重新查看（无需 root）。
+装完会**当场打印可复制的连接信息**；之后任何时间可用 `bash deploy.sh info`（Linux）或 `.\deploy.ps1 -Mode Info`（Windows）重新查看（`status` 无需 root；`info` 的 token/密钥存于 0600 文件，需 root 查看）。
 
 **二进制向导版**（交互式问答，同样装完即运行 + 开机自启）：
 
@@ -115,6 +115,7 @@ bash deploy.sh info   # 随时查看当前 特权命令 授权状态（菜单选
 - token 即设备钥匙；agent 对每条发起指令校验 token（分片/流消息按 ID/会话绑定）
 - 生产建议 WSS（agent 支持 `-tls-cert/-tls-key`）；clientd 自带 API 密钥
 - 默认拒绝跨源 Origin；低权限运行账户；文件临时写入 + 原子改名
+- token / API 密钥经 EnvironmentFile（0600，仅 root 与服务账户可读）注入，**不进 unit 文件（0644 全局可读）、不进命令行（ps 可见）**；`deploy.sh info` / `rtctl-wizard info` 查看凭据需 root
 
 完整协议与架构见 [DESIGN.md](DESIGN.md)，机器客户端契约（完成语义/错误码/重试幂等）见其第 6 节。
 

@@ -64,7 +64,7 @@ func cmdServe(args []string) error {
 	sub := flag.NewFlagSet("serve", flag.ExitOnError)
 	listen := sub.String("listen", "127.0.0.1:18080", "HTTP 监听地址（Agent 调用入口）")
 	devicesFile := sub.String("devices", "devices.json", "设备清单（device_id -> token + url 直连地址）")
-	apiKey := sub.String("api-key", "", "API 密钥（留空自动生成并打印一次）")
+	apiKey := sub.String("api-key", "", "API 密钥（留空读环境变量 RTCTL_API_KEY；再为空则自动生成并打印一次）")
 	allowSudo := sub.Bool("allow-sudo", false, "允许转发特权命令（sudo:true）；未开启时特权请求回 approval_required，需用户批准后开启")
 	sub.Parse(args)
 
@@ -85,6 +85,10 @@ func cmdServe(args []string) error {
 	}
 	if len(devices) == 0 {
 		return errors.New("设备清单为空")
+	}
+	if *apiKey == "" {
+		// 环境变量注入：避免密钥进命令行（ps 全局可见）与 systemd unit（0644 全局可读）
+		*apiKey = os.Getenv("RTCTL_API_KEY")
 	}
 	if *apiKey == "" {
 		*apiKey = idutil.New()

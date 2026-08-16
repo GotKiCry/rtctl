@@ -20,7 +20,7 @@ irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.ps1 -OutFile de
   [1] 安装 agent（被控端）               ← 引导：设备ID → 端口 → token(自动生成/手动) → WSS
   [2] 安装 clientd（AI Agent 直控服务）   ← 引导：设备清单路径 → 监听地址 → API密钥
   [3] 查看状态（运行 + 开机自启）
-  [4] 查看连接信息（复制 token / 设备清单片段 / 验证命令，无需 root）
+  [4] 查看连接信息（复制 token / 设备清单片段 / 验证命令；token 存于 0600 文件，需 root 查看）
   [5] 升级到最新版
   [6] 卸载组件
   [7] 退出
@@ -63,7 +63,7 @@ bash deploy.sh client / status / info / update agent|clientd / uninstall all
 |---|---|
 | token 高熵 | 菜单/向导自动生成 / 脚本自定（务必用高熵随机串） |
 | 低权限运行账户 | Linux agent 默认 rtctl-agent、clientd 默认 rtctl |
-| token 不进命令行 | 环境变量 / 任务环境变量注入 |
+| token / 密钥不进命令行与 unit | EnvironmentFile 0600（Linux）/ 计划任务环境变量（Windows） |
 | 设备清单 0600 且归属服务账户 | Linux 安装器自动 chown |
 | 跨源防护 | agent 默认拒绝跨源 Origin |
 | WSS/TLS | 传参启用（生产必开） |

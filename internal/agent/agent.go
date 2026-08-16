@@ -18,6 +18,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"rtctl/internal/idutil"
 	"rtctl/internal/proto"
 )
 
@@ -164,7 +165,14 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 	if p.TimeoutMS > 0 {
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(p.TimeoutMS)*time.Millisecond)
 	}
+	// ID 冲突拒绝：重复 ID 会覆盖注册表项，导致 kill 失效、输出混杂（契约 6.4）
 	a.mu.Lock()
+	if _, dup := a.execs[m.ID]; dup {
+		a.mu.Unlock()
+		cancel()
+		sendExecOutput(sink, m.ID, "", true, 1, "exec ID 冲突（请换新 ID 重试）", proto.ErrorCodeConflict, false)
+		return
+	}
 	a.execs[m.ID] = cancel
 	a.mu.Unlock()
 	defer func() {
@@ -343,6 +351,11 @@ func (a *Agent) handleFilePut(m proto.Msg, sink sendSink) {
 		sendFilePutAck(sink, m.ID, false, "并发上传超限")
 		return
 	}
+	if _, dup := a.putFiles[m.ID]; dup {
+		a.mu.Unlock()
+		sendFilePutAck(sink, m.ID, false, "传输 ID 冲突（"+proto.ErrorCodeConflict+"）")
+		return
+	}
 	a.mu.Unlock()
 
 	mode := p.Mode
@@ -517,31 +530,46 @@ type shellHandle struct {
 
 // handleShellOpen 同步创建并注册会话（在读循环线程内），随后起 goroutine 泵输出。
 func (a *Agent) handleShellOpen(m proto.Msg, sink sendSink) {
+	// 并发闸必须持有到会话结束（defer 在函数返回时就释放，会让上限形同虚设）
 	select {
 	case a.shellSem <- struct{}{}:
-		defer func() { <-a.shellSem }()
 	default:
 		ack, _ := proto.WithPayload(proto.Msg{Type: proto.TypeShellAck, SessionID: m.SessionID},
 			proto.ShellAckPayload{OK: false, Error: "并发 shell 超限"})
 		sink.Send(ack)
 		return
 	}
+	// 空会话 ID（旧客户端）由 agent 兜底生成，避免注册表键冲突
+	sid := m.SessionID
+	if sid == "" {
+		sid = idutil.New()
+	}
+	fail := func(why string) {
+		<-a.shellSem
+		ack, _ := proto.WithPayload(proto.Msg{Type: proto.TypeShellAck, SessionID: sid},
+			proto.ShellAckPayload{OK: false, Error: why})
+		sink.Send(ack)
+	}
 	sess, err := newShellSession()
 	if err != nil {
-		ack, _ := proto.WithPayload(proto.Msg{Type: proto.TypeShellAck, SessionID: m.SessionID},
-			proto.ShellAckPayload{OK: false, Error: err.Error()})
-		sink.Send(ack)
+		fail(err.Error())
 		return
 	}
 	sh := &shellHandle{sess: sess}
 	a.mu.Lock()
-	a.shells[m.SessionID] = sh
+	if _, dup := a.shells[sid]; dup {
+		a.mu.Unlock()
+		sess.Close()
+		fail("会话 ID 冲突（" + proto.ErrorCodeConflict + "）")
+		return
+	}
+	a.shells[sid] = sh
 	a.mu.Unlock()
 
-	ack, _ := proto.WithPayload(proto.Msg{Type: proto.TypeShellAck, SessionID: m.SessionID},
+	ack, _ := proto.WithPayload(proto.Msg{Type: proto.TypeShellAck, SessionID: sid},
 		proto.ShellAckPayload{OK: true})
 	sink.Send(ack)
-	log.Printf("[agent] shell 打开: 会话=%s", m.SessionID)
+	log.Printf("[agent] shell 打开: 会话=%s", sid)
 
 	// 进程输出 -> 上行消息
 	go func() {
@@ -553,7 +581,7 @@ func (a *Agent) handleShellOpen(m proto.Msg, sink sendSink) {
 				if runtime.GOOS == "windows" {
 					data = decodeConsoleOutput(data)
 				}
-				d, _ := proto.WithPayload(proto.Msg{Type: proto.TypeShellData, SessionID: m.SessionID},
+				d, _ := proto.WithPayload(proto.Msg{Type: proto.TypeShellData, SessionID: sid},
 					proto.ShellDataPayload{Data: string(data)})
 				sink.Send(d)
 			}
@@ -562,17 +590,18 @@ func (a *Agent) handleShellOpen(m proto.Msg, sink sendSink) {
 			}
 		}
 	}()
-	// 进程退出 -> 从注册表移除并通知服务器关闭会话
+	// 进程退出 -> 从注册表移除、通知关闭会话、释放并发闸（会话生命周期终点）
 	go func() {
 		sess.Wait()
 		a.mu.Lock()
-		_, ok := a.shells[m.SessionID]
+		_, ok := a.shells[sid]
 		if ok {
-			delete(a.shells, m.SessionID)
+			delete(a.shells, sid)
 		}
 		a.mu.Unlock()
+		<-a.shellSem
 		if ok {
-			sink.Send(proto.Msg{Type: proto.TypeShellClose, SessionID: m.SessionID})
+			sink.Send(proto.Msg{Type: proto.TypeShellClose, SessionID: sid})
 		}
 	}()
 }

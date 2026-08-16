@@ -314,7 +314,8 @@ func cmdShell(args []string) error {
 	}
 	defer conn.Close()
 
-	openMsg := proto.Msg{Type: proto.TypeShellOpen, Token: *token}
+	// 会话 ID 由客户端生成（空 ID 会让多个 shell 在 agent 注册表里互相覆盖）
+	openMsg := proto.Msg{Type: proto.TypeShellOpen, Token: *token, SessionID: idutil.New()}
 	if err := conn.WriteJSON(openMsg); err != nil {
 		return err
 	}

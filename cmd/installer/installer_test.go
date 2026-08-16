@@ -15,7 +15,7 @@ func TestBuildLinuxPlanAgentDirect(t *testing.T) {
 	}
 	for _, want := range []string{
 		`ExecStart=/usr/local/bin/rtctl-agent -listen ":8443" -id "jp-tokyo-01"`,
-		"Environment=RTCTL_TOKEN=tok-abc",
+		"EnvironmentFile=/etc/rtctl/agent.env",
 		"User=rtctl-agent",
 		"Restart=always",
 		"WantedBy=multi-user.target",
@@ -24,6 +24,13 @@ func TestBuildLinuxPlanAgentDirect(t *testing.T) {
 		if !strings.Contains(plan.unit, want) {
 			t.Errorf("unit 缺少 %q\n%s", want, plan.unit)
 		}
+	}
+	// token 不得内联进 unit（0644 全局可读），必须在 0600 的 EnvironmentFile 里
+	if strings.Contains(plan.unit, "tok-abc") {
+		t.Errorf("token 不应出现在 unit 里\n%s", plan.unit)
+	}
+	if got := plan.extraFiles["/etc/rtctl/agent.env"]; got != "RTCTL_TOKEN=tok-abc\n" {
+		t.Errorf("agent.env 内容不对: %q", got)
 	}
 	if plan.unitName != "rtctl-agent" {
 		t.Errorf("unitName=%s", plan.unitName)
@@ -78,15 +85,32 @@ func TestBuildLinuxPlanClientd(t *testing.T) {
 	for _, want := range []string{
 		`serve -listen "127.0.0.1:18080"`,
 		`-devices /etc/rtctl/clientd-devices.json`,
-		`-api-key "key-1"`,
+		"EnvironmentFile=/etc/rtctl/clientd.env",
 		"User=rtctl",
 	} {
 		if !strings.Contains(plan.unit, want) {
 			t.Errorf("unit 缺少 %q\n%s", want, plan.unit)
 		}
 	}
+	// api-key 不得出现在 ExecStart（ps 全局可见），必须在 0600 的 EnvironmentFile 里
+	if strings.Contains(plan.unit, "key-1") {
+		t.Errorf("api-key 不应出现在 unit 里\n%s", plan.unit)
+	}
+	if got := plan.extraFiles["/etc/rtctl/clientd.env"]; got != "RTCTL_API_KEY=key-1\n" {
+		t.Errorf("clientd.env 内容不对: %q", got)
+	}
 	if plan.unitName != "rtctl-clientd" {
 		t.Errorf("unitName=%s", plan.unitName)
+	}
+}
+
+func TestBuildLinuxPlanRejectsNewlineInSecrets(t *testing.T) {
+	// token / api-key 写入 EnvironmentFile（每行 KEY=value），换行会造成行注入
+	if _, err := buildLinuxPlan(&installConfig{component: "agent", id: "x", listen: ":8443", token: "a\nb"}); err == nil {
+		t.Error("含换行的 token 应被拒绝")
+	}
+	if _, err := buildLinuxPlan(&installConfig{component: "clientd", httpListen: "127.0.0.1:1", apiKey: "a\rb"}); err == nil {
+		t.Error("含回车的 api-key 应被拒绝")
 	}
 }
 

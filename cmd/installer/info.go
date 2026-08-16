@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"html"
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -28,8 +29,16 @@ func printInfoLinux() {
 	if execLine != "" {
 		listen := argAfter(execLine, "-listen")
 		id := argAfter(execLine, "-id")
-		token := strings.Trim(strings.TrimPrefix(unitLine("rtctl-agent", "Environment=RTCTL_TOKEN="),
-			"Environment=RTCTL_TOKEN="), "\"")
+		// 新版：token 在 0600 的 EnvironmentFile 里（需 root 读）；
+		// 旧版兼容：unit 的 Environment=RTCTL_TOKEN= 内联
+		token := envFileValue("/etc/rtctl/agent.env", "RTCTL_TOKEN")
+		if token == "" {
+			token = strings.Trim(strings.TrimPrefix(unitLine("rtctl-agent", "Environment=RTCTL_TOKEN="),
+				"Environment=RTCTL_TOKEN="), "\"")
+		}
+		if token == "" {
+			token = "(token 存于 /etc/rtctl/agent.env，0600 需 root 查看)"
+		}
 		ip := lanIPv4()
 		if ip == "" {
 			ip = "<本机IP>"
@@ -55,7 +64,14 @@ func printInfoLinux() {
 
 	if cd := unitLine("rtctl-clientd", "ExecStart="); cd != "" {
 		hl := argAfter(cd, "-listen")
-		ak := argAfter(cd, "-api-key")
+		// 新版从 EnvironmentFile 读；旧版兼容 -api-key 参数
+		ak := envFileValue("/etc/rtctl/clientd.env", "RTCTL_API_KEY")
+		if ak == "" {
+			ak = argAfter(cd, "-api-key")
+		}
+		if ak == "" {
+			ak = "(存于 /etc/rtctl/clientd.env，0600 需 root 查看)"
+		}
 		fmt.Println()
 		fmt.Println("  ── clientd（AI Agent 直控入口）──")
 		fmt.Printf("  HTTP 地址: http://%s\n", hl)
@@ -133,6 +149,20 @@ func taskXMLText(task string) string {
 		return ""
 	}
 	return string(out)
+}
+
+// envFileValue 读取 EnvironmentFile（KEY=value 每行一条）中指定键的值；读不到返回空串。
+func envFileValue(path, key string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, key+"="); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // argAfter 提取命令行中 flag 后的第一个参数（去掉包裹引号）。

@@ -123,10 +123,12 @@ func uninstallService(comp string) error {
 		switch c {
 		case "agent":
 			os.Remove("/usr/local/bin/rtctl-agent")
-			os.Remove("/etc/rtctl/agent.token")
+			os.Remove("/etc/rtctl/agent.env")
+			os.Remove("/etc/rtctl/agent.token") // 旧版残留
 			os.Remove("/etc/sudoers.d/rtctl-agent")
 		case "clientd":
 			os.Remove("/usr/local/bin/rtctl-client")
+			os.Remove("/etc/rtctl/clientd.env")
 			os.Remove("/etc/rtctl/clientd-devices.json")
 		}
 		fmt.Printf("✔ %s 已卸载\n", c)

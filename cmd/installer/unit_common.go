@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // linuxPlan 一次 Linux 安装的生成物。
@@ -35,6 +36,10 @@ func buildLinuxPlan(cfg *installConfig) (*linuxPlan, error) {
 			user = "rtctl"
 		}
 	}
+	// 凭据不能含换行（EnvironmentFile 每行一个 KEY=value，换行会造成注入）
+	if strings.ContainsAny(cfg.token, "\r\n") || strings.ContainsAny(cfg.apiKey, "\r\n") {
+		return nil, errors.New("token / api-key 不能包含换行符")
+	}
 	dst := "/usr/local/bin/" + name
 	plan := &linuxPlan{unitName: unitName, binaryName: name, user: user, extraFiles: map[string]string{}}
 	execLine := ""
@@ -57,10 +62,16 @@ func buildLinuxPlan(cfg *installConfig) (*linuxPlan, error) {
 %s ALL=(ALL) NOPASSWD: /bin/sh, /usr/bin/sh, /usr/bin/kill, /bin/kill
 `, user)
 		}
-		unitExtra = fmt.Sprintf("Environment=RTCTL_TOKEN=%s\n", cfg.token)
+		// token 走 EnvironmentFile（0600，仅 root 与服务账户可读），
+		// 不写进 unit——unit 文件 0644 全局可读，放 Environment= 会把钥匙交给所有本地用户
+		plan.extraFiles["/etc/rtctl/agent.env"] = "RTCTL_TOKEN=" + cfg.token + "\n"
+		unitExtra = "EnvironmentFile=/etc/rtctl/agent.env\n"
 	case "clientd":
-		execLine = fmt.Sprintf("%s -client-id clientd serve -listen %q -devices /etc/rtctl/clientd-devices.json -api-key %q",
-			dst, cfg.httpListen, cfg.apiKey)
+		// api-key 同理：不进命令行（ps 可见）、不进 unit，经 EnvironmentFile 注入
+		plan.extraFiles["/etc/rtctl/clientd.env"] = "RTCTL_API_KEY=" + cfg.apiKey + "\n"
+		unitExtra = "EnvironmentFile=/etc/rtctl/clientd.env\n"
+		execLine = fmt.Sprintf("%s -client-id clientd serve -listen %q -devices /etc/rtctl/clientd-devices.json",
+			dst, cfg.httpListen)
 		if cfg.allowSudo {
 			// clientd 本身不需提权（sudo 在设备端执行），只是打开特权请求转发闸
 			execLine += " -allow-sudo"

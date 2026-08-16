@@ -52,10 +52,11 @@ rtctl/
    - `exec` 退出码透传：`exec 'exit /b 42'` → exit 42；`-workdir` 生效。
    - **嵌套引号**：`exec -c 'powershell -NoProfile -Command "1..5 | ForEach-Object { ''x'' }"'` 必须输出 5 行（历史 bug：cmd.exe 剥引号，修复靠 `SysProcAttr.CmdLine`）。
    - **超时杀进程树**：`exec -timeout 1000 'ping -n 10 127.0.0.1'` 应 ~1s 返回 `[执行超时]`（Linux 用 `sleep 100`，之后 pgrep 确认无孤儿）。
-   - **错误码**：错 token → `bad_token`。
+   - **错误码**：错 token → `bad_token`；重复 exec ID → `conflict`（internal/agent/agent_test.go 覆盖，smoke/check.go 可端到端复核）。
+   - **shell 会话**：两个并发 shell 各自 echo 不同标记，输出不得串台；开满 8 个后第 9 个被拒（agent_test.go 覆盖）。
    - **文件传输**：`file-put`/`file-get` 往返后哈希一致（用 >256KB 随机文件覆盖分片路径）；覆盖同名文件生效；不存在文件回 `not_found`。
    - **shell**：管道输入 `"echo hi`r`nexit`r`n"` 必须看到 hi 输出（EOF 宽限修复）。
-   - **clientd**：`client serve -listen 127.0.0.1:18080 -devices devices.json -api-key test` 起服务后：`/healthz` 免认证 ok；无 key 401；`/api/v1/devices`、`/api/v1/exec`（退出码/超时）、`/api/v1/files/upload|download`（哈希一致）；并发 5 exec + 2 上传；设备掉线时请求回 `connection_lost`。
+   - **clientd**：`client serve -listen 127.0.0.1:18080 -devices devices.json -api-key test` 起服务后：`/healthz` 免认证 ok；无 key 401；`/api/v1/devices`、`/api/v1/exec`（退出码/超时）、`/api/v1/files/upload|download`（哈希一致）；并发 5 exec + 2 上传；设备掉线时请求回 `connection_lost`。另验证 `-api-key` 缺省时读 `RTCTL_API_KEY` 环境变量。
 4. 收尾：`Stop-Process` 所有测试进程，删除 `smoke/`（含带凭据的测试助手脚本）。
 
 ## 协议契约（Machine Client Contract 要点）
@@ -83,6 +84,10 @@ rtctl/
 - **特权命令（sudo）三道闸**：① agent `-allow-sudo`（装时选允许提权，写 sudoers 最小放行 `/bin/sh /usr/bin/sh /usr/bin/kill /bin/kill` + NoNewPrivileges=false）；② CLI `-sudo`（TTY y/N 确认；非交互必须 `-confirm-sudo`）/ clientd `-allow-sudo`（否则 403 `approval_required`）；③ sudoers 匹配。错误码 `sudo_disabled` / `sudo_denied` / `approval_required`。旧 agent（<3.1.0）不认识 sudo 字段会**静默按低权限执行**——发特权请求前先 `list` 看版本。
 - **sudo 执行不能用 CommandContext 杀树**：sudo 会为目标命令新建会话/进程组，且 ctx 取消时 CommandContext 抢先杀掉的只是 sudo 直接子进程——两者叠加导致孙进程全漏杀。sudo 路径用普通 `exec.Command`，杀树时经 `/proc/<pid>/stat` 的 ppid BFS 收集全部后代（含 sudo 自身），再 `sudo -n /bin/sh -c 'kill -KILL <pids...>'` 一次杀光（实测 timeout 1.5s → 1.6s 返回、无孤儿）。
 - `-race` 构建在 Windows 需要 cgo（gcc）；本机没有时改用功能性测试替代。
+- **凭据落盘只能走 EnvironmentFile**（0600 + chown 服务账户）：unit 文件 0644 全局可读、命令行参数 `ps` 全局可见，token/api-key 放这两处等于交给所有本地用户。clientd 的 api-key 优先读 `RTCTL_API_KEY` 环境变量；`info` 从 env 文件提取凭据（需 root），不要再回退到 unit 内联 `Environment=` / `-api-key` 参数。
+- **shell 会话 ID 两端兜底**：client 用 `idutil.New()` 生成；agent 收到空 ID 时兜底生成并在 shell_ack 回传（历史 bug：空 ID 让多个 shell 在注册表里互相覆盖、按键串台、断连清理误杀）。
+- **并发闸持有到资源释放**：shell 信号量在会话退出 goroutine 里释放（历史 bug：`defer` 在 handleShellOpen 返回时释放，maxConcurrentShell 形同虚设）。
+- **ID 冲突必须拒绝**：exec / file_put / shell_open 注册前查重，冲突回 `conflict`（契约 6.4）；重复 ID 会覆盖注册表导致 kill 失效、输出混杂。
 
 ## 修改检查清单
 

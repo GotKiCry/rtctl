@@ -117,7 +117,7 @@
 
 ### 5.2 clientd（`cmd/client serve`）
 
-- **凭据隔离**：本地设备清单提供 device_id -> token+url 映射；Agent 只使用 device_id。
+- **凭据隔离**：本地设备清单提供 device_id -> token+url 映射；Agent 只使用 device_id。API 密钥优先从 `RTCTL_API_KEY` 环境变量读取（安装器经 EnvironmentFile 注入）。
 - **API**：`GET /api/v1/devices`、`POST /api/v1/exec`、`POST /api/v1/files/upload|download`，Bearer API 密钥（不传自动生成）。
 - **生命周期**：每请求独立连接；请求超时/断开即向 agent 发 exec_kill / file_abort。
 - **背压**：agent 侧发送队列满时普通帧丢弃并在 done 帧标注 `truncated`；done 帧与文件分片阻塞送达；慢消费者 10s 写超时断连并取消其 exec。
@@ -189,7 +189,7 @@
 | client exec | -sudo / -confirm-sudo | false | 特权命令 + 非交互确认（交互下 y/N 当面确认） |
 | client serve | -listen | 127.0.0.1:18080 | HTTP 监听地址 |
 | client serve | -devices | devices.json | 设备清单（device_id -> token+url） |
-| client serve | -api-key | 空 | API 密钥（留空自动生成并打印） |
+| client serve | -api-key | 空 | API 密钥（留空读 RTCTL_API_KEY，再为空自动生成并打印；推荐环境变量注入） |
 | client serve | -allow-sudo | false | 特权命令转发闸（开才转发 sudo:true，否则 403 approval_required） |
 
 ## 8. 目录结构
@@ -233,7 +233,7 @@ client -server ws://jp服务器IP:8443/ws file-get -token <token> /var/log/app.l
 
 ## 10. 安全注意事项
 
-1. token 即设备钥匙，务必通过安全渠道分发，用环境变量注入而非命令行参数（避免进 shell history）。
+1. token 即设备钥匙，务必通过安全渠道分发，用环境变量注入而非命令行参数（避免进 shell history）。安装器经 EnvironmentFile（0600，root:服务账户）注入——不要回退到 unit 内联 `Environment=`（unit 0644 全局可读）或 `-api-key` 命令行参数（`ps` 全局可见）。
 2. 生产建议启用 WSS（`-tls-cert/-tls-key`），否则 token 与指令内容明文传输。
 3. 默认拒绝跨源 Origin；给 AI Agent 使用时建议在 agent 侧以最小权限账户运行。
 4. 本系统等同远程 shell 的能力：只应在可信网络/设备上使用，不要部署到不信任的设备。

@@ -121,6 +121,8 @@ cmd_agent() {
     esac
   done
   [[ -n "$listen" && -n "$id" && -n "$token" ]] || fail "--listen / --id / --token 必填"
+  # token 将写入 EnvironmentFile（每行 KEY=value），换行会造成注入
+  [[ "$token" != *$'\n'* && "$token" != *$'\r'* ]] || fail "token 不能包含换行符"
   { [[ -n "$tls_cert" && -n "$tls_key" ]] || [[ -z "$tls_cert" && -z "$tls_key" ]]; } \
     || fail "--tls-cert 与 --tls-key 必须同时提供"
 
@@ -130,7 +132,10 @@ cmd_agent() {
   mkdir -p /etc/rtctl
   systemctl stop rtctl-agent 2>/dev/null || true
   install -m 755 "$bin" /usr/local/bin/rtctl-agent
-  echo "$token" > /etc/rtctl/agent.token && chmod 600 /etc/rtctl/agent.token
+  # token 落 EnvironmentFile（0600 + 属服务账户），不写进 unit（unit 文件 0644 全局可读）
+  printf 'RTCTL_TOKEN=%s\n' "$token" > /etc/rtctl/agent.env
+  chmod 600 /etc/rtctl/agent.env && chown "$run_user" /etc/rtctl/agent.env
+  rm -f /etc/rtctl/agent.token  # 旧版残留清理
 
   # systemd ExecStart 不做 shell 解析，参数按空格分隔直写即可
   local exec_args="-listen $listen"
@@ -160,7 +165,7 @@ Wants=network-online.target
 
 [Service]
 User=$run_user
-Environment=RTCTL_TOKEN=$token
+EnvironmentFile=/etc/rtctl/agent.env
 ExecStart=/usr/local/bin/rtctl-agent $exec_args
 Restart=always
 RestartSec=3
@@ -204,6 +209,7 @@ cmd_clientd() {
     esac
   done
   [[ -n "$devices" && -f "$devices" ]] || fail "--devices <设备清单文件> 必填（文件需存在；每条设备带 url 直连地址）"
+  [[ "$api_key" != *$'\n'* && "$api_key" != *$'\r'* ]] || fail "api-key 不能包含换行符"
 
   local bin
   bin="$(get_bin "client-linux-$(get_arch)")"
@@ -215,8 +221,11 @@ cmd_clientd() {
   cp "$devices" /etc/rtctl/clientd-devices.json
   chmod 600 /etc/rtctl/clientd-devices.json
   chown "$run_user" /etc/rtctl/clientd-devices.json
+  # api-key 走 EnvironmentFile，不进命令行（ps 可见）也不进 unit（0644 全局可读）
+  printf 'RTCTL_API_KEY=%s\n' "$api_key" > /etc/rtctl/clientd.env
+  chmod 600 /etc/rtctl/clientd.env && chown "$run_user" /etc/rtctl/clientd.env
 
-  local exec_line="/usr/local/bin/rtctl-client -client-id clientd serve -listen $listen -devices /etc/rtctl/clientd-devices.json -api-key \"$api_key\""
+  local exec_line="/usr/local/bin/rtctl-client -client-id clientd serve -listen $listen -devices /etc/rtctl/clientd-devices.json"
   # 特权命令转发闸：仅用户批准后开启（未开启时 AI Agent 的特权请求一律 403）
   [[ -n "$allow_sudo" ]] && exec_line+=" -allow-sudo"
 
@@ -228,6 +237,7 @@ Wants=network-online.target
 
 [Service]
 User=$run_user
+EnvironmentFile=/etc/rtctl/clientd.env
 ExecStart=$exec_line
 Restart=always
 RestartSec=3
@@ -282,8 +292,13 @@ cmd_info() {
     exec_line="$(echo "$unit_text" | grep '^ExecStart=' | head -1)"
     listen="$(echo "$exec_line" | grep -o '\-listen [^ ]*' | awk '{print $2}' | tr -d '"')"
     id="$(echo "$exec_line" | grep -o '\-id [^ ]*' | awk '{print $2}' | tr -d '"')"
-    token="$(echo "$unit_text" | grep '^Environment=RTCTL_TOKEN=' | head -1 | sed 's/^Environment=RTCTL_TOKEN=//' | tr -d '"')"
-    [[ -n "$token" ]] || token='(token 未配置)'
+    # 新版：0600 的 EnvironmentFile（非 root 读不到）；旧版兼容：unit 内联 Environment=
+    if [[ -r /etc/rtctl/agent.env ]]; then
+      token="$(grep '^RTCTL_TOKEN=' /etc/rtctl/agent.env | head -1 | cut -d= -f2-)"
+    else
+      token="$(echo "$unit_text" | grep '^Environment=RTCTL_TOKEN=' | head -1 | sed 's/^Environment=RTCTL_TOKEN=//' | tr -d '"')"
+    fi
+    [[ -n "$token" ]] || token='(token 存于 /etc/rtctl/agent.env，0600 需 root 查看)'
     port="${listen##*:}"
     ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
     [[ -n "$ip" ]] || ip="<本机IP>"
@@ -310,7 +325,12 @@ cmd_info() {
     local hl api_key cd_exec
     cd_exec="$(systemctl cat rtctl-clientd 2>/dev/null | grep '^ExecStart=' | head -1)"
     hl="$(echo "$cd_exec" | grep -o '\-listen [^ ]*' | awk '{print $2}' | tr -d '"')"
-    api_key="$(echo "$cd_exec" | grep -o '\-api-key [^ ]*' | awk '{print $2}' | tr -d '"')"
+    if [[ -r /etc/rtctl/clientd.env ]]; then
+      api_key="$(grep '^RTCTL_API_KEY=' /etc/rtctl/clientd.env | head -1 | cut -d= -f2-)"
+    else
+      api_key="$(echo "$cd_exec" | grep -o '\-api-key [^ ]*' | awk '{print $2}' | tr -d '"')"
+    fi
+    [[ -n "$api_key" ]] || api_key='(存于 /etc/rtctl/clientd.env，0600 需 root 查看)'
     echo
     echo -e "  ${C_GREEN}── clientd（AI Agent 直控入口）──${C_NC}"
     echo -e "  ${C_GREEN}HTTP 地址:${C_NC} http://$hl"
@@ -344,8 +364,8 @@ cmd_uninstall() {
     systemctl disable --now "$unit" 2>/dev/null || true
     rm -f "/etc/systemd/system/$unit.service"
     case "$c" in
-      agent)   rm -f /usr/local/bin/rtctl-agent /etc/rtctl/agent.token /etc/sudoers.d/rtctl-agent ;;
-      clientd) rm -f /usr/local/bin/rtctl-client /etc/rtctl/clientd-devices.json ;;
+      agent)   rm -f /usr/local/bin/rtctl-agent /etc/rtctl/agent.env /etc/rtctl/agent.token /etc/sudoers.d/rtctl-agent ;;
+      clientd) rm -f /usr/local/bin/rtctl-client /etc/rtctl/clientd.env /etc/rtctl/clientd-devices.json ;;
     esac
     log "✔ $c 已卸载"
   done
@@ -448,7 +468,7 @@ case "${1:-}" in
   uninstall) shift; cmd_uninstall "${1:-}" ;;
   update)    shift; cmd_update "${1:-}" ;;
   client)
-    local bin; bin="$(get_bin "client-linux-$(get_arch)")"
+    bin="$(get_bin "client-linux-$(get_arch)")"
     log "✔ client 就绪: $bin"
     log "  用法: $bin -server ws://<设备IP>:<端口>/ws exec -token <token> 'uptime'"
     ;;
