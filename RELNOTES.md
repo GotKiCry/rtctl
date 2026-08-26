@@ -28,9 +28,11 @@
 
 | 文件 | 平台 | 用途 |
 |---|---|---|
-| `rtctl-agent` | Linux amd64 / arm64 | 目标服务器被控端 |
+| `rtctl-agent-linux-amd64` | Linux x64 | 目标服务器被控端 |
+| `rtctl-agent-linux-arm64` | Linux arm64 | 目标服务器被控端（树莓派/ARM 云主机） |
 | `rtctl-agent.exe` | Windows | 目标服务器被控端 |
-| `rtctl` | Linux amd64 / arm64 | 本机控制端 |
+| `rtctl-linux-amd64` | Linux x64 | 本机控制端 |
+| `rtctl-linux-arm64` | Linux arm64 | 本机控制端 |
 | `rtctl.exe` | Windows | 本机控制端 |
 | `SHA256SUMS.txt` | — | 以上文件校验值 |
 

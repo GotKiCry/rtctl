@@ -98,8 +98,11 @@ agent 默认以**当前用户**的身份运行（所以尽量用普通用户跑�
 
 ```powershell
 pwsh ./build.ps1
-# 生成 bin/ 目录下的 rtctl、rtctl-agent（Windows/Linux、x64/arm64 共 4 个），
-# 以及 SHA256SUMS.txt 校验文件。需要本机装了 Go 1.25+。
+# 生成 bin/ 目录下 6 个文件（互不覆盖）：
+#   rtctl.exe / rtctl-agent.exe             Windows x64
+#   rtctl-linux-amd64 / rtctl-agent-linux-amd64   Linux x64
+#   rtctl-linux-arm64 / rtctl-agent-linux-arm64   Linux arm64
+# 外加 SHA256SUMS.txt 校验文件。需要本机装了 Go 1.25+。
 ```
 
 详细协议说明（字段、错误码、边界行为）见 [DESIGN.md](DESIGN.md)。

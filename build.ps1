@@ -16,12 +16,14 @@ $targets = @(
 foreach ($t in $targets) {
   $env:GOOS = $t.os
   $env:GOARCH = $t.arch
+  # Windows 用 rtctl.exe / rtctl-agent.exe；Linux 带架构后缀（amd64/arm64 不互相覆盖）
+  $suffix = if ($t.os -eq 'windows') { '' } else { "-$($t.os)-$($t.arch)" }
   $ext = if ($t.os -eq 'windows') { '.exe' } else { '' }
-  & go build -trimpath -ldflags '-s -w' -o (Join-Path $out ("rtctl" + $ext)) ./cmd/client
+  & go build -trimpath -ldflags '-s -w' -o (Join-Path $out ("rtctl" + $suffix + $ext)) ./cmd/client
   if ($LASTEXITCODE -ne 0) { throw "build rtctl ($($t.os)/$($t.arch)) failed" }
-  & go build -trimpath -ldflags '-s -w' -o (Join-Path $out ("rtctl-agent" + $ext)) ./cmd/agent
+  & go build -trimpath -ldflags '-s -w' -o (Join-Path $out ("rtctl-agent" + $suffix + $ext)) ./cmd/agent
   if ($LASTEXITCODE -ne 0) { throw "build rtctl-agent ($($t.os)/$($t.arch)) failed" }
-  Write-Host "built: rtctl$ext / rtctl-agent$ext  ($($t.os)/$($t.arch))"
+  Write-Host "built: rtctl$suffix$ext / rtctl-agent$suffix$ext  ($($t.os)/$($t.arch))"
 }
 
 $lines = Get-ChildItem $out -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | Sort-Object Name | ForEach-Object {

@@ -7,10 +7,12 @@ Set-Location $PSScriptRoot
 
 $Version = 'v3.2.0'
 $Assets = @(
-  (Join-Path $PSScriptRoot 'bin/rtctl'),
-  (Join-Path $PSScriptRoot 'bin/rtctl-agent'),
   (Join-Path $PSScriptRoot 'bin/rtctl.exe'),
   (Join-Path $PSScriptRoot 'bin/rtctl-agent.exe'),
+  (Join-Path $PSScriptRoot 'bin/rtctl-linux-amd64'),
+  (Join-Path $PSScriptRoot 'bin/rtctl-agent-linux-amd64'),
+  (Join-Path $PSScriptRoot 'bin/rtctl-linux-arm64'),
+  (Join-Path $PSScriptRoot 'bin/rtctl-agent-linux-arm64'),
   (Join-Path $PSScriptRoot 'bin/SHA256SUMS.txt')
 )
 
