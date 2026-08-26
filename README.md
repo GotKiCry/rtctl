@@ -1,124 +1,105 @@
-# rtctl — 远程终端控制系统（AI Agent 直控，纯直连版）
+# rtctl — 远程终端控制工具（直连版）
 
-用 Go 实现的远程终端控制系统，专为 **AI Agent 直控目标服务器** 设计。**没有中继、没有中心服务器**——目标机上的 agent 自带监听，clientd/client 直接连接：
+> ⚠️ **安全警告（请先读）**
+> - **token 就是钥匙**：谁拿到 token 谁就能控制这台服务器，别发群里、别写进代码仓库、别截图乱传。
+> - **默认是明文连接**：不配置证书时，命令和 token 都在网络上明文传输，同一网络的人可以截获。公网/共享网络**务必**配置 `tls_cert` / `tls_key` 启用加密。
+> - **启动日志会打印 token**：注意日志文件的可见范围，别把 agent 的日志发出去。
+> - **agent 请用普通用户运行**（别用 root）；这会远程执行 Shell，等于把目标机器交给你，**只装在你可信的机器上**。
 
-```
-AI Agent ──HTTP API──→ clientd (client serve, 常驻服务) ──直连──→ agent (目标服务器, 自带监听)
-```
-
-- **Agent 不再手动复制指令、不再手动传输文件**：操作机上起一个常驻 HTTP 服务（`client serve`），Agent 通过 REST API 直接执行命令、上传/下载文件。
-- **agent**（被控端，Linux/Windows）：自带 WS 服务端（`-listen`），持设备 token 即可控。
-- **client**（控制端 CLI）：直连 agent，`list / exec / shell / file-put / file-get`。
-- 每设备独立 token 认证；文件传输分片+哈希可校验；审计归因。
-
-## 核心能力
-
-| 能力 | 说明 |
-|---|---|
-| `exec` | 一次性命令：退出码、超时（杀整个进程树）、workdir、stdin、`-c` 原样命令 |
-| 文件传输 | `file-put` / `file-get`（256KB 分片，哈希校验一致），CLI 与 HTTP API 双入口 |
-| `shell` | 交互终端（Linux 真 PTY / Windows cmd 管道） |
-| `list` | 设备信息与元数据（OS/架构/主机名/版本） |
-| 机器契约 | `-json` 结构化输出、机器可读错误码、`truncated` 截断标记、done 帧可靠送达 |
-| 可靠性 | 断开即取消远端（无孤儿进程）、并发/大小上限 |
-
-## 快速开始
+一句话：两个小工具。**agent 放在目标服务器上**，**rtctl 在你本机**，输一行命令就能远程执行 Shell 并拿回结果：
 
 ```bash
-# 1. 构建（需 Go >= 1.25，或 GOTOOLCHAIN 自动下载）
-go build -o bin/ ./cmd/...
-#    bin/ 附带预编译产物：Windows exe + Linux amd64/arm64 静态二进制（免编译直传）
-
-# 2. 目标服务器：agent 自带监听
-RTCTL_TOKEN='设备token' ./bin/agent -listen :8443 -id jp-tokyo-01
-
-# 3. 操作机：常驻 HTTP 服务（AI Agent 入口），设备清单里写 agent 的直连地址
-cat > devices.json <<'EOF'
-{ "devices": [ { "id": "jp-tokyo-01", "url": "ws://jp服务器IP:8443/ws", "token": "设备token" } ] }
-EOF
-./bin/client serve -listen 127.0.0.1:18080 -devices devices.json -api-key my-api-key
-
-# 4. AI Agent 直接调用（无需手动复制指令/传文件）
-curl -H 'Authorization: Bearer my-api-key' \
-  -d '{"device_id":"jp-tokyo-01","cmd":"uptime"}' http://127.0.0.1:18080/api/v1/exec
+rtctl 192.168.1.5:8443 你的token 'uptime'
 ```
 
-CLI 也可直连：`./bin/client -server ws://jp服务器IP:8443/ws exec -token <token> 'uptime'`
+不需要中继服务器、不需要中心数据库、不需要装一大堆东西。就这两个二进制，Linux/Windows 都能跑。
 
-## HTTP API（client serve）
+## 三分钟上手
 
-| 端点 | 说明 |
-|---|---|
-| `GET /healthz` | 健康检查（免认证） |
-| `GET /api/v1/devices` | 设备列表（逐个探活） |
-| `POST /api/v1/exec` | `{"device_id","cmd","timeout_ms","workdir","stdin"}` → `{"exit_code","output","truncated","error","error_code","duration_ms"}` |
-| `POST /api/v1/files/upload` | `{"device_id","path","data"(base64),"mode"}` → `{"ok","size"}` |
-| `POST /api/v1/files/download` | `{"device_id","path"}` → `{"ok","size","data"(base64)}` |
-
-- 认证：`Authorization: Bearer <api-key>`（`-api-key` 不传则读环境变量 `RTCTL_API_KEY`，再为空自动生成并打印）
-- 设备寻址用 `device_id`，token 只存在于 clientd 的本地设备清单——Agent 永远不接触 token
-- 调用方超时/断开会自动取消远端命令；连接失败回 `connection_lost`
-
-CLI 文件传输：`client file-put -token T local.txt /etc/remote.txt`、`client file-get -token T /var/log/app.log ./app.log`
-
-## 一条指令安装（交互菜单，推荐）
-
-v2ray-agent 风格：一条命令直达**彩色管理菜单**（安装 / 状态 / 升级 / 卸载，装完立即后台运行 + 开机自启）：
+**目标服务器上（Linux / Windows 都行）：**
 
 ```bash
-# Linux（root 执行；非 root 会自动提权，交互式引导端口/token 可自动生成或自定义）
-wget -P /root -N --no-check-certificate "https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.sh" \
-  && chmod 700 /root/deploy.sh && /root/deploy.sh
+./rtctl-agent -init        # 第一次运行：自动生成配置文件 + 随机钥匙（token）
+./rtctl-agent             # 之后直接启动，启动时会打印钥匙，抄下来就行
 ```
+
+启动后你会看到类似：
+
+```text
+rtctl-agent 启动: id=node-01 listen=:8443 tls=false allow-sudo=false token=4a82...（配置: agent.conf）
+```
+
+**你自己电脑上（把 IP、token 换成上面的）：**
+
+```bash
+./rtctl 192.168.1.5:8443 4a82... 'uptime'                    # 执行一条命令
+./rtctl 192.168.1.5:8443 4a82... 'df -h && free -m'          # 多命令拼一起也行
+./rtctl 192.168.1.5:8443 4a82... 'ping -c 3 baidu.com'       # 有输出的都拿得回来
+```
+
+结果包含：**命令输出 + 退出码**。命令失败（比如退出码 42），rtctl 也会返回 42，方便脚本判断。
+
+## 还能做什么
+
+| 操作 | 命令 | 说明 |
+|---|---|---|
+| 执行命令 | `rtctl <IP>:<端口> <token> '命令'` | 最常用，支持超时、指定目录、输入 |
+| 交互式终端 | `rtctl -server ws://IP:8443/ws shell -token <token>` | 像 SSH 一样进入终端，Linux 上可以跑 vim/top |
+| 查看设备信息 | `rtctl -server ws://IP:8443/ws list` | 系统类型、架构、主机名、版本 |
+| 传文件上去 | `rtctl -server ws://IP:8443/ws file-put -token <token> 本地文件 /远端/路径` | 大文件自动分段传，256MB 以内 |
+| 把文件拉回来 | `rtctl -server ws://IP:8443/ws file-get -token <token> /远端/路径 本地文件` | 传完会校验，内容不一致会报错 |
+
+一些更常用的写法：
+
+```bash
+# 执行带超时的命令（50 秒自动停止，并把命令连同子进程一起结束）
+rtctl <IP>:<端口> <token> -c 'sleep 999' -timeout 50000
+
+# 输出结构化 JSON，方便程序调用
+rtctl -json -server ws://IP:8443/ws exec -token <token> -c 'uptime'
+```
+
+> `-timeout`、`-c` 这些参数是全局参数还是子命令参数，看下面的用法说明即可；最常用的第一种写法已经够用。
+
+## agent 的配置文件（agent.conf）
+
+第一次运行 `-init` 会自动生成，内容很简单：
+
+```ini
+listen = :8443          # 监听端口，0.0.0.0 上的 8443
+id = node-01            # 给这台机器起个名字
+token = 4a82...         # 连接钥匙，别人拿到就能控制这台机器
+tls_cert =              # 两个都填上 = 启用加密连接（推荐外网使用）
+tls_key =
+allow_sudo = false      # 是否允许远程执行需要 root 权限的命令
+```
+
+配置和程序放同一个目录就行；也可以用 `-config` 指定别的路径。
+
+## 需要管理员/root 权限的命令怎么办
+
+agent 默认以**当前用户**的身份运行（所以尽量用普通用户跑，别用 root）。
+
+- **Linux**：远程命令加 `-sudo`，配合三层确认：
+  1. agent 要开了 `allow_sudo = true`；
+  2. 本机执行时你会被当面询问"确定吗？"（脚本里用 `-confirm-sudo`）；
+  3. 服务器上给 agent 用户配一条 sudo 免密规则（`NOPASSWD`，只放行需要的命令）。
+  缺哪一层都直接报错（`sudo_disabled` / `sudo_denied`），**不会静默降级执行**。
+- **Windows**：没有 sudo 这东西，agent 能拿到多少权限就是运行它的用户有多少权限（管理员运行 = 全局权限，普通用户运行 = 普通权限）。
+
+## 安全提示（重要）
+
+1. **token 就是钥匙**：谁拿到 token 谁就能控制这台服务器，别发群里、别写进代码/脚本提交到仓库。
+2. 建议内网直连；跨公网时**务必**填上 `tls_cert` / `tls_key` 开启加密（否则命令和 token 是明文传输，同一网络的人能截获）。
+3. agent.conf 权限已设为仅本人可读（0600）；启动日志会打印 token，注意日志别外传。
+4. 远程 shell 能力 = 这台机器等同交给你：只在你自己可信的机器上部署。
+
+## 自己构建
 
 ```powershell
-# Windows（管理员 PowerShell）
-irm https://raw.githubusercontent.com/GotKiCry/rtctl/main/deploy.ps1 -OutFile deploy.ps1
-.\deploy.ps1
+pwsh ./build.ps1
+# 生成 bin/ 目录下的 rtctl、rtctl-agent（Windows/Linux、x64/arm64 共 4 个），
+# 以及 SHA256SUMS.txt 校验文件。需要本机装了 Go 1.25+。
 ```
 
-菜单选项：`[1] 安装 agent`（被控端）· `[2] 安装 clientd`（AI Agent 直控服务）· `[3] 查看状态（运行+开机自启）` · `[4] 查看连接信息（复制 token/设备清单/验证命令）` · `[5] 升级` · `[6] 卸载` · `[7] 退出`。安装 agent/clientd 时都会问**是否允许 root 提权**（默认否）。
-
-装完会**当场打印可复制的连接信息**；之后任何时间可用 `bash deploy.sh info`（Linux）或 `.\deploy.ps1 -Mode Info`（Windows）重新查看（`status` 无需 root；`info` 的 token/密钥存于 0600 文件，需 root 查看）。
-
-**二进制向导版**（交互式问答，同样装完即运行 + 开机自启）：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/main/bin/rtctl-wizard-linux-amd64 -o rtctl-wizard
-chmod +x rtctl-wizard && ./rtctl-wizard        # Linux 非 root 自动提权
-./rtctl-wizard status                          # 一键查看运行状态与开机自启
-./rtctl-wizard info                            # 一键查看连接信息（ID/地址/token/可复制的设备清单片段）
-./rtctl-wizard uninstall agent|clientd|all     # 卸载
-```
-
-脚本化部署（`deploy.sh agent --listen :8443 --id X --token T` 等）仍可用，详见 [deploy/README.md](deploy/README.md)。
-
-## 特权命令（root）审批
-
-agent 默认以低权限账户运行，root 命令（如 `docker ps`）默认**全链路拒绝**。要执行特权命令，三道闸必须全部由人显式打开：
-
-1. **被控端授权**：安装 agent 时选"允许 root 提权"（`deploy.sh agent ... --allow-sudo` / 向导同款选项）→ 自动写 sudoers 最小放行 + 开启 `-allow-sudo`；
-2. **控制端批准**：CLI `client exec -sudo 'docker ps'`（交互下 y/N 当面确认；非交互加 `-confirm-sudo`）；AI Agent 走 clientd 时，需用户在控制端以 `--allow-sudo` 装 clientd，否则特权请求一律 403 `approval_required`；
-3. **sudoers 放行**：`rtctl-agent ALL=(ALL) NOPASSWD: /bin/sh, /usr/bin/sh, /usr/bin/kill, /bin/kill`（仅 agent 提权所需的最小命令集，卸载自动删除）。
-
-```bash
-client -server ws://<设备IP>:8443/ws exec -token <token> -sudo 'docker ps'   # 交互确认后以 root 执行
-bash deploy.sh info   # 随时查看当前 特权命令 授权状态（菜单选 4）
-```
-
-- 失败语义：未授权 → `sudo_disabled`；sudoers 不匹配 → `sudo_denied`；clientd 未批准 → `approval_required`。
-- 版本门槛：需 agent ≥ 3.1.0；旧 agent 不认识 sudo 字段会按低权限执行，调用前先 `list` 确认版本。
-- 超时/取消会以 root 杀整棵进程树（sudo 会为新会话，agent 经 /proc 遍历后代逐一终止）。
-
-## 安全
-
-- token 即设备钥匙；agent 对每条发起指令校验 token（分片/流消息按 ID/会话绑定）
-- 生产建议 WSS（agent 支持 `-tls-cert/-tls-key`）；clientd 自带 API 密钥
-- 默认拒绝跨源 Origin；低权限运行账户；文件临时写入 + 原子改名
-- token / API 密钥经 EnvironmentFile（0600，仅 root 与服务账户可读）注入，**不进 unit 文件（0644 全局可读）、不进命令行（ps 可见）**；`deploy.sh info` / `rtctl-wizard info` 查看凭据需 root
-
-完整协议与架构见 [DESIGN.md](DESIGN.md)，机器客户端契约（完成语义/错误码/重试幂等）见其第 6 节。
-
-## 开源协议
-
-[MIT License](LICENSE) © 2026 GotKiCry
+详细协议说明（字段、错误码、边界行为）见 [DESIGN.md](DESIGN.md)。

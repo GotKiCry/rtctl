@@ -1,5 +1,5 @@
 // Package agent 实现被控端：直连模式，自带 WS 服务端，
-// client / clientd 直接连接本机并执行指令。
+// 本机 client 直接连接并执行指令。
 package agent
 
 import (
@@ -50,9 +50,9 @@ type Agent struct {
 	shells   map[string]*shellHandle       // session_id -> 终端会话
 	putFiles map[string]*filePutState      // 传输 ID -> 上传状态
 
-	execSem  chan struct{} // exec 并发信号量
-	shellSem chan struct{} // shell 并发信号量
-	getSem   chan struct{} // 文件下载并发信号量（上传并发按 putFiles 计数）
+	execSem  chan struct{} // exec 并发数量限制
+	shellSem chan struct{} // shell 并发数量限制
+	getSem   chan struct{} // 文件下载并发数量限制（上传按 putFiles 计数）
 }
 
 // filePutState 一个进行中的文件上传。
@@ -123,7 +123,7 @@ func (a *Agent) handleMsg(ctx context.Context, m proto.Msg, sink sendSink) {
 	case proto.TypeShellData, proto.TypeShellResize, proto.TypeShellClose:
 		a.handleShellCtrl(m)
 	case proto.TypeFilePut:
-		// 同步创建临时文件并注册状态，避免后续分片早于注册到达被丢弃
+		// 先同步创建临时文件并登记状态，避免后续数据段早到被丢掉
 		a.handleFilePut(m, sink)
 	case proto.TypeFilePutChunk:
 		a.handleFilePutChunk(m)
@@ -214,11 +214,11 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 		sendExecOutput(sink, m.ID, "", true, 1, "启动进程失败: "+err.Error(), proto.ErrorCodeStartFailed, false)
 		return
 	}
-	// 超时/取消时终止整个进程树（孙进程也要杀）
+	// 超时/取消时结束命令和所有子进程（孙进程也一起）
 	go func() {
 		<-ctx.Done()
 		if ctx.Err() != nil {
-			log.Printf("[agent] exec 超时/取消，杀进程树 sudo=%v cmd=%s", p.Sudo, p.Cmd)
+			log.Printf("[agent] exec 超时/取消，结束命令与子进程 sudo=%v cmd=%s", p.Sudo, p.Cmd)
 			killProcessTree(cmd, p.Sudo)
 		}
 	}()
@@ -248,7 +248,7 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 				head = append(head, data...)
 			}
 			if err := sendExecOutput(sink, m.ID, string(data), false, 0, "", "", false); err != nil {
-				truncated = true // 背压丢帧：在 done 帧上打截断标记
+				truncated = true // 发送忙不过来回传被丢过：在结束帧上标记内容不完整
 			}
 			seq++
 		}
@@ -334,7 +334,7 @@ func (a *Agent) handleExecKill(m proto.Msg) {
 // ---- 文件传输 ----
 
 // handleFilePut 开始一次上传：校验大小、创建临时文件并注册状态。
-// 分片由 handleFilePutChunk（读循环内串行）处理，最后一片 done=true 落盘。
+// 数据段由 handleFilePutChunk（读循环内串行）处理，最后一段 done=true 落盘。
 func (a *Agent) handleFilePut(m proto.Msg, sink sendSink) {
 	var p proto.FilePutPayload
 	if err := m.PayloadOf(&p); err != nil || p.Path == "" {
@@ -384,12 +384,12 @@ func (a *Agent) handleFilePutChunk(m proto.Msg) {
 	}
 	var p proto.FileChunkPayload
 	if err := m.PayloadOf(&p); err != nil {
-		a.failFilePut(m.ID, st, "分片解析失败")
+		a.failFilePut(m.ID, st, "数据段解析失败")
 		return
 	}
 	data, err := base64.StdEncoding.DecodeString(p.Data)
 	if err != nil {
-		a.failFilePut(m.ID, st, "分片 base64 解码失败")
+		a.failFilePut(m.ID, st, "数据段解码失败")
 		return
 	}
 	if _, err := st.file.Write(data); err != nil {
@@ -404,7 +404,7 @@ func (a *Agent) handleFilePutChunk(m proto.Msg) {
 	if !p.Done {
 		return
 	}
-	// 完成：关闭、chmod、原子改名（Windows 需先移除同名目标）
+	// 完成：关文件、设权限、用临时文件替换正式文件（Windows 需先移除同名目标）
 	if err := st.file.Close(); err != nil {
 		a.failFilePut(m.ID, st, "关闭文件失败: "+err.Error())
 		return
@@ -446,7 +446,7 @@ func sendFilePutAck(sink sendSink, id string, ok bool, errStr string) {
 	sink.Send(ack)
 }
 
-// handleFileGet 下载文件：分片流式回传；文件数据必须可靠送达（阻塞发送）。
+// handleFileGet 下载文件：按段回传；文件数据必须送达（发不出去就断开）。
 func (a *Agent) handleFileGet(m proto.Msg, sink sendSink) {
 	select {
 	case a.getSem <- struct{}{}:

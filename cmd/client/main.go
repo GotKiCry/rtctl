@@ -9,7 +9,7 @@
 // 全局参数（必须放在子命令之前）:
 //
 //	-server    设备地址（agent 直连地址，默认 ws://127.0.0.1:8443/ws）
-//	-client-id 操作者/Agent 标识（审计归因）
+//	-client-id 操作者/Agent 标识（记日志用）
 //	-json      结构化输出（list / exec 生效）
 package main
 
@@ -53,7 +53,7 @@ type execResult struct {
 func main() {
 	fs := flag.NewFlagSet("rtctl-client", flag.ExitOnError)
 	fs.StringVar(&serverURL, "server", "ws://127.0.0.1:8443/ws", "设备地址（agent 直连地址）")
-	fs.StringVar(&clientID, "client-id", "", "操作者/Agent 标识（审计归因）")
+	fs.StringVar(&clientID, "client-id", "", "操作者/Agent 标识（记日志用）")
 	fs.BoolVar(&jsonMode, "json", false, "结构化输出（list / exec）")
 	fs.Parse(os.Args[1:])
 
@@ -74,11 +74,20 @@ func main() {
 		err = cmdFilePut(args[1:])
 	case "file-get":
 		err = cmdFileGet(args[1:])
-	case "serve":
-		err = cmdServe(args[1:])
 	default:
-		usage()
-		os.Exit(2)
+		// 快捷入口: rtctl <host:port> <token> <cmd...>
+		// 显式传入地址优先于 -server 默认值（用户给出 host:port 即视为连接目标）。
+		if len(args) >= 2 && strings.Contains(args[0], ":") {
+			serverURL = normalizeServer(args[0])
+			cmdArgs := []string{"-token", args[1]}
+			if len(args) > 2 {
+				cmdArgs = append(cmdArgs, "-c", strings.Join(args[2:], " "))
+			}
+			err = cmdExec(cmdArgs)
+		} else {
+			usage()
+			os.Exit(2)
+		}
 	}
 	if err != nil {
 		if jsonMode {
@@ -91,12 +100,26 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, "rtctl-client - 远程终端控制端\n\n用法:\n  rtctl-client [全局参数] list\n  rtctl-client [全局参数] exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-sudo] [-confirm-sudo] [-c 命令 | 命令...]\n  rtctl-client [全局参数] shell -token <设备token>\n  rtctl-client [全局参数] file-put -token <设备token> [-mode 0644] <本地文件> <远端路径>\n  rtctl-client [全局参数] file-get -token <设备token> <远端路径> <本地文件>\n  rtctl-client [全局参数] serve -listen 127.0.0.1:18080 -devices devices.json [-api-key K] [-allow-sudo]\n\n全局参数:\n  -server    设备地址（agent 直连地址，默认 ws://127.0.0.1:8443/ws）\n  -client-id 操作者/Agent 标识（审计归因）\n  -json      结构化输出（list / exec 生效）\n\n特权命令（-sudo）:\n  需被控端 agent 开启 -allow-sudo（安装时由管理员授权）；交互下 CLI 会向用户当面确认，\n  非交互（AI Agent / 管道）须显式 -confirm-sudo 或经 clientd（-allow-sudo 审批闸）。\n")
+	fmt.Fprint(os.Stderr, "rtctl - 远程终端控制端\n\n用法:\n  rtctl <host:port> <token> <命令...>                     # 快捷: 直接执行一条命令\n  rtctl [全局参数] list\n  rtctl [全局参数] exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-sudo] [-confirm-sudo] [-c 命令 | 命令...]\n  rtctl [全局参数] shell -token <设备token>\n  rtctl [全局参数] file-put -token <设备token> [-mode 0644] <本地文件> <远端路径>\n  rtctl [全局参数] file-get -token <设备token> <远端路径> <本地文件>\n\n快速上手:\n  # 目标机: ./rtctl-agent -init 生成配置后自动带监听\n  # 本机:   rtctl 192.168.1.5:8443 <token> 'uptime'\n\n全局参数:\n  -server    设备地址（agent 直连地址，默认 ws://127.0.0.1:8443/ws）\n  -client-id 操作者/Agent 标识（记日志用）\n  -json      结构化输出（list / exec 生效）\n\n特权命令（-sudo）:\n  需被控端 agent 开启 -allow-sudo；交互下 CLI 会向用户当面确认，非交互须显式 -confirm-sudo。\n")
 }
 
 func printJSONError(err error) {
 	b, _ := json.Marshal(map[string]string{"error": err.Error()})
 	fmt.Println(string(b))
+}
+
+// normalizeServer 把用户输入规范为 ws URL：host:port -> ws://host:port/ws。
+// 已带 ws:// / wss:// 前缀则保留；路径缺省时补 /ws。
+func normalizeServer(addr string) string {
+	s := addr
+	if !strings.HasPrefix(s, "ws://") && !strings.HasPrefix(s, "wss://") {
+		s = "ws://" + s
+	}
+	rest := s[strings.Index(s, "://")+3:]
+	if !strings.Contains(rest, "/") {
+		s += "/ws"
+	}
+	return s
 }
 
 // connect 连接服务器并完成认证，返回就绪的连接。
@@ -174,7 +197,7 @@ func cmdExec(args []string) error {
 	sub := flag.NewFlagSet("exec", flag.ExitOnError)
 	token := sub.String("token", "", "目标设备 token")
 	timeoutMS := sub.Int("timeout", 0, "超时毫秒（0=不限）")
-	deadlineSec := sub.Int("deadline", 0, "客户端总等待秒数（0=不限；默认 timeout+10s 宽限）")
+	deadlineSec := sub.Int("deadline", 0, "客户端最多等多少秒（0=不限；默认超时后再多等 10 秒）")
 	workdir := sub.String("workdir", "", "工作目录")
 	stdinFile := sub.String("stdin-file", "", "写入命令 stdin 的文件")
 	rawCmd := sub.String("c", "", "原样命令字符串（不再拼接参数）")
@@ -272,7 +295,7 @@ func cmdExec(args []string) error {
 			if p.Done {
 				if !jsonMode {
 					if p.Truncated {
-						fmt.Fprintln(os.Stderr, "\n[警告: 输出被截断]")
+						fmt.Fprintln(os.Stderr, "\n[警告: 输出太多，已截断]")
 					}
 					if p.Error != "" {
 						fmt.Fprintf(os.Stderr, "\n[%s]\n", p.Error)
@@ -388,7 +411,7 @@ func cmdShell(args []string) error {
 			if rerr != nil {
 				if rerr == io.EOF {
 					// stdin 关闭（管道输入场景）：给远端 shell 一点时间消化
-					// 已缓冲的输入再关闭会话，否则命令会被 PTY 关闭吞掉
+					// 让终端先把缓冲的输入处理完再关闭，否则刚敲的命令会被吃掉
 					time.Sleep(500 * time.Millisecond)
 					conn.WriteJSON(proto.Msg{Type: proto.TypeShellClose, SessionID: sessionID})
 				}

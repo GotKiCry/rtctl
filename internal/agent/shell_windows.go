@@ -13,7 +13,7 @@ import (
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
-// pipeSession Windows 上的 cmd 管道模式（非真 PTY，普通命令完全可用）。
+// pipeSession Windows 上的 cmd 管道模式（不是真终端，普通命令完全可用）。
 type pipeSession struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
@@ -75,7 +75,7 @@ func (s *pipeSession) Close() error {
 	return nil
 }
 
-// killProcessTree Windows 上终止整个进程树：
+// killProcessTree Windows 上结束命令和所有子进程：
 // TerminateProcess 只杀直接子进程，孙进程会存活并继续持有输出管道，
 // 因此用 taskkill /T 级联终止。
 // sudo 参数忽略：计划任务以 SYSTEM 运行，本就拥有全部权限。
@@ -91,7 +91,7 @@ func killProcessTree(cmd *exec.Cmd, sudo bool) {
 
 // decodeConsoleOutput 把 Windows 控制台输出转换为 UTF-8。
 // 启发式：已是合法 UTF-8 则原样返回（现代程序），否则按 GBK/CP936 解码
-// （中文系统 cmd 默认代码页）。分片边界切开多字节字符时回退原样，宁可不转不损坏。
+// （中文系统 cmd 默认代码页）。分段恰好切开多字节字符时回退原样，宁可不转不损坏。
 func decodeConsoleOutput(b []byte) []byte {
 	if utf8.Valid(b) {
 		return b

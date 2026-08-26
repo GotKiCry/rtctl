@@ -10,7 +10,7 @@ const (
 	TypeList         = "list"           // client -> agent 查询设备信息
 	TypeListAck      = "list_ack"       // agent -> client 设备列表
 	TypeExec         = "exec"           // client -> agent 一次性执行命令
-	TypeExecOutput   = "exec_output"    // agent -> client 执行输出分片
+	TypeExecOutput   = "exec_output"    // agent -> client 命令输出
 	TypeExecKill     = "exec_kill"      // client -> agent 取消执行
 	TypeShellOpen    = "shell_open"     // client -> agent 打开交互终端
 	TypeShellAck     = "shell_ack"      // agent -> client 终端打开结果
@@ -18,10 +18,10 @@ const (
 	TypeShellResize  = "shell_resize"   // client -> agent 调整窗口大小
 	TypeShellClose   = "shell_close"    // 双向 关闭终端
 	TypeFilePut      = "file_put"       // client -> agent 开始上传（Msg.ID 为传输 ID）
-	TypeFilePutChunk = "file_put_chunk" // client -> agent 上传分片（最后一个分片 done=true）
+	TypeFilePutChunk = "file_put_chunk" // client -> agent 上传数据段（最后一段 done=true）
 	TypeFilePutAck   = "file_put_ack"   // agent -> client 上传完成回执
 	TypeFileGet      = "file_get"       // client -> agent 请求下载
-	TypeFileGetChunk = "file_get_chunk" // agent -> client 下载分片（最后一个分片 done=true）
+	TypeFileGetChunk = "file_get_chunk" // agent -> client 下载数据段（最后一段 done=true）
 	TypeFileAbort    = "file_abort"     // client -> agent 取消传输
 	TypeError        = "error"          // 通用错误
 )
@@ -55,7 +55,7 @@ func WithPayload(m Msg, v any) (Msg, error) {
 
 // ---- 各消息 payload ----
 
-// AuthPayload 客户端认证（可选字段，审计归因用）。
+// AuthPayload 客户端打招呼内容（可选字段，记录操作者身份用）。
 type AuthPayload struct {
 	ID string `json:"id,omitempty"` // 操作者/Agent 标识
 }
@@ -90,7 +90,7 @@ type ExecPayload struct {
 	Sudo      bool   `json:"sudo,omitempty"`  // true = 请求 root 提权执行（需被控端开启 -allow-sudo；审批语义见 DESIGN.md）
 }
 
-// ExecOutputPayload 执行输出分片；最后一帧 Done=true 携带退出码。
+// ExecOutputPayload 命令输出；最后一帧 Done=true 携带退出码。
 type ExecOutputPayload struct {
 	Seq       int    `json:"seq"`
 	Data      string `json:"data"`
@@ -98,7 +98,7 @@ type ExecOutputPayload struct {
 	ExitCode  int    `json:"exit_code,omitempty"`
 	Error     string `json:"error,omitempty"`
 	ErrorCode string `json:"error_code,omitempty"` // 机器可读错误码（见 ErrorCode* 常量）
-	Truncated bool   `json:"truncated,omitempty"`  // 输出因背压被丢弃过（不可靠完整性）
+	Truncated bool   `json:"truncated,omitempty"`  // 输出太多，中间丢过一部分（内容不完整）
 }
 
 // ExecKillPayload 取消执行。
@@ -136,7 +136,7 @@ type FilePutPayload struct {
 	Size int64  `json:"size"`
 }
 
-// FileChunkPayload 文件分片：Data 为 base64 编码的原始字节。
+// FileChunkPayload 文件数据段：Data 为 base64 编码的原始字节。
 type FileChunkPayload struct {
 	Seq  int    `json:"seq"`
 	Data string `json:"data"`
@@ -154,7 +154,7 @@ type FileGetPayload struct {
 	Path string `json:"path"`
 }
 
-// FileGetChunkPayload 下载分片；失败时 Done=true 且 Error 非空。
+// FileGetChunkPayload 下载数据段；失败时 Done=true 且 Error 非空。
 type FileGetChunkPayload struct {
 	Seq       int    `json:"seq"`
 	Data      string `json:"data"`
@@ -174,12 +174,12 @@ const (
 	ErrorCodeOverload     = "overload"        // 并发超限
 	ErrorCodeConflict     = "conflict"        // ID 冲突
 	ErrorCodeNotFound     = "not_found"       // 文件不存在
-	ErrorCodeBadDevice    = "bad_device"      // 未知设备 ID（clientd 配置中不存在）
+	ErrorCodeBadDevice    = "bad_device"      // 未知设备 ID（多设备场景；直连单设备不使用）
 	ErrorCodeConnLost     = "connection_lost" // 与设备的连接断开
 	ErrorCodeInternal     = "internal"        // 内部错误
 
 	// 特权命令（sudo）相关：
 	ErrorCodeSudoDisabled     = "sudo_disabled"     // 被控端未开启 -allow-sudo（需人工在被控端授权）
 	ErrorCodeSudoDenied       = "sudo_denied"       // sudo 执行失败（sudoers 未放行 / 密码缺失）
-	ErrorCodeApprovalRequired = "approval_required" // 控制端 clientd 未开启 -allow-sudo（需人工在控制端批准）
+	ErrorCodeApprovalRequired = "approval_required" // 特权命令未获用户批准（非交互未加 -confirm-sudo）
 )

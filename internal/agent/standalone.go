@@ -1,5 +1,5 @@
 // standalone.go —— agent 直连模式：agent 自带 WS 服务端，
-// client / clientd 直接连接本机，无需中继 server。
+// 本机 client 直接连接目标机，无需中继 server。
 package agent
 
 import (
@@ -70,13 +70,12 @@ func (c *standaloneConn) CloseConn() { c.ws.Close() }
 
 // Standalone agent 直连模式的 WS 服务端。
 type Standalone struct {
-	agent          *Agent
-	allowAnyOrigin bool
+	agent *Agent
 }
 
 // ServeStandalone 启动直连监听（阻塞直到 ctx 取消或服务出错）。
-func (a *Agent) ServeStandalone(ctx context.Context, listen, tlsCert, tlsKey string, allowAnyOrigin bool) error {
-	s := &Standalone{agent: a, allowAnyOrigin: allowAnyOrigin}
+func (a *Agent) ServeStandalone(ctx context.Context, listen, tlsCert, tlsKey string) error {
+	s := &Standalone{agent: a}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
@@ -108,7 +107,7 @@ func (s *Standalone) handleWS(w http.ResponseWriter, r *http.Request) {
 	up := websocket.Upgrader{
 		ReadBufferSize:  4096,
 		WriteBufferSize: 4096,
-		CheckOrigin:     func(r *http.Request) bool { return s.allowAnyOrigin || originOK(r) },
+		CheckOrigin:     originOK,
 	}
 	ws, err := up.Upgrade(w, r, nil)
 	if err != nil {
@@ -208,7 +207,7 @@ func (s *Standalone) serveConn(cc *standaloneConn) {
 			cc.mu.Unlock()
 			a.handleFilePut(m, cc)
 		case proto.TypeFilePutChunk:
-			// 分片消息不带 token（由 file_put 校验并建立传输）
+			// 数据段消息不带 token（由 file_put 校验并建立传输）
 			a.handleFilePutChunk(m)
 		case proto.TypeFileGet:
 			if !s.checkToken(cc, m) {

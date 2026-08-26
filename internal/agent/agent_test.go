@@ -235,7 +235,7 @@ func TestFilePutIDConflict(t *testing.T) {
 		}
 		return false, "(无 ack)"
 	}
-	// 第一次 put 建立中（无 ack 属正常，分片未到）；第二次必须冲突拒绝
+	// 第一次上传进行中（还没回执，数据段未到齐）；第二次必须冲突拒绝
 	ok2, err2 := ackOf(s2)
 	if ok2 || !strings.Contains(err2, proto.ErrorCodeConflict) {
 		t.Errorf("第二次 file_put 应冲突拒绝: ok=%v err=%q", ok2, err2)

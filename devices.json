@@ -1,6 +1,0 @@
-{
-  "devices": [
-    { "id": "web-01", "token": "change-me-web-01-token" },
-    { "id": "db-01",  "token": "change-me-db-01-token" }
-  ]
-}

@@ -7,3 +7,6 @@ deploy/*.xml
 # Go
 *.test
 *.out
+
+# 构建产物（build.ps1 生成；SHA256SUMS.txt 随产物一起，不入库）
+bin/

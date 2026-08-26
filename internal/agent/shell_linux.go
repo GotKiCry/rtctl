@@ -15,7 +15,7 @@ import (
 	"github.com/creack/pty"
 )
 
-// ptySession 基于真 PTY 的交互终端（Linux/macOS）。
+// ptySession 交互终端会话（Linux/macOS 走虚拟终端）。
 type ptySession struct {
 	cmd  *exec.Cmd
 	ptmx *os.File
@@ -46,7 +46,7 @@ func (s *ptySession) Resize(cols, rows uint16) error {
 
 func (s *ptySession) Wait() error { <-s.done; return nil }
 
-// Close 优雅关闭：关闭 PTY（shell 收到 EOF/SIGHUP），最多等 2 秒再强杀。
+// Close 正常关闭：先关终端（shell 收到 EOF/SIGHUP），最多等 2 秒再强杀。
 func (s *ptySession) Close() error {
 	s.ptmx.Close()
 	select {
@@ -61,8 +61,8 @@ func (s *ptySession) Close() error {
 
 // killProcessTree 终止整个进程组（shellExecArgs 设置了 Setpgid，
 // 子进程为组长，杀 -pid 覆盖所有孙进程）。
-// sudo=true 时无法直接按组杀：sudo 会为目标命令新建会话/进程组，
-// Setpgid 的组 ID（sudo 自身 pid）覆盖不到 /bin/sh 与孙进程。
+// 提权执行时无法直接按组杀：sudo 会给目标命令新建会话/进程组，
+// 之前设置的进程组 ID 覆盖不到 /bin/sh 和它的子进程。
 // 因此经 /proc 遍历后代 pid，再用一次 sudo kill 全部终止。
 func killProcessTree(cmd *exec.Cmd, sudo bool) {
 	if cmd.Process == nil {
