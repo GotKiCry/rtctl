@@ -23,7 +23,7 @@ import (
 )
 
 // Version agent 版本号。
-const Version = "3.1.0"
+const Version = "3.2.0"
 
 const (
 	maxConcurrentExec  = 32 // 单设备并发 exec 上限
