@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -36,6 +37,13 @@ type cfg struct {
 	tlsCert   string
 	tlsKey    string
 	allowSudo bool
+}
+
+// firewallResult 各平台 firewall_*.go 的 openFirewallPort 返回值：
+// summary 为单行摘要（进启动块），detail 为附加提示（可为空）。
+type firewallResult struct {
+	summary string
+	detail  string
 }
 
 // loadConfig 解析 agent.conf（key = value，# 或 ; 注释，空行忽略）。
@@ -86,15 +94,41 @@ func writeConfig(path string, c cfg) error {
 	return os.WriteFile(path, []byte(content), 0o600)
 }
 
-// defaultConfigPath 返回默认配置路径：先 exe 同目录，回退当前工作目录。
+// homeConfigPath 返回用户级配置文件路径：~/.rtctl/agent.conf。
+// 配置（含 token 凭据）统一放在用户目录下，多个部署/多用户不会互相覆盖。
+func homeConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".rtctl", configName)
+}
+
+// defaultConfigPath 返回默认配置路径，查找顺序：
+//  1. ~/.rtctl/agent.conf        —— 推荐位置（-init 也写这里）
+//  2. exe 同目录 agent.conf      —— 便携/旧版部署兼容
+//  3. 当前工作目录 agent.conf    —— 旧版部署兼容
+//  4. 都没有时返回 ~/.rtctl/agent.conf（作为 -init 写入目标 / 报错提示路径）
 func defaultConfigPath() string {
+	if p := homeConfigPath(); p != "" {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
 	if exe, err := os.Executable(); err == nil {
 		p := filepath.Join(filepath.Dir(exe), configName)
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
 	}
-	return filepath.Join(".", configName)
+	legacy := filepath.Join(".", configName)
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy
+	}
+	if p := homeConfigPath(); p != "" {
+		return p
+	}
+	return legacy
 }
 
 // genToken 生成高熵 token（32 字节 = 64 hex 字符）。
@@ -114,6 +148,78 @@ func hostnameOrDefault() string {
 	return "node"
 }
 
+// localIPv4s 枚举本机 IPv4 地址（非回环优先，回环最后），启动时提示"该用什么地址连我"。
+// 仅用标准库网卡枚举，返回失败时退化为 127.0.0.1。
+func localIPv4s() []string {
+	var out []string
+	if ifs, err := net.Interfaces(); err == nil {
+		for _, ifi := range ifs {
+			if ifi.Flags&net.FlagUp == 0 {
+				continue
+			}
+			addrs, err := ifi.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, a := range addrs {
+				ipn, ok := a.(*net.IPNet)
+				if !ok {
+					continue
+				}
+				ip4 := ipn.IP.To4()
+				if ip4 == nil || ip4.IsLoopback() || ip4.IsLinkLocalUnicast() {
+					continue
+				}
+				out = append(out, ip4.String())
+			}
+		}
+	}
+	if len(out) == 0 {
+		return []string{"127.0.0.1"}
+	}
+	return append(out, "127.0.0.1")
+}
+
+// printStartup 格式化打印启动信息：监听地址、本机可用地址、防火墙状态、连接示例。
+func printStartup(c cfg, configPath, fwSummary string) {
+	schema := "ws"
+	if c.tlsCert != "" {
+		schema = "wss"
+	}
+	host, port, perr := net.SplitHostPort(c.listen)
+	if perr != nil {
+		host, port = "", ""
+	}
+	var hostPorts []string
+	if port == "" {
+		// 端口解析失败（listen 格式异常）：直接原样展示，避免拼出 "IP:" 尾巴
+		hostPorts = []string{c.listen}
+	} else if host == "" || host == "0.0.0.0" || host == "::" {
+		// 全监听：列出本机所有可用 IP
+		for _, ip := range localIPv4s() {
+			hostPorts = append(hostPorts, net.JoinHostPort(ip, port))
+		}
+	} else {
+		// 指定了具体监听地址：只提示该地址
+		hostPorts = append(hostPorts, net.JoinHostPort(host, port))
+	}
+
+	fmt.Printf("rtctl-agent 启动 ✔  (id=%s)\n", c.id)
+	fmt.Printf("  监听地址 : %s（%s）\n", c.listen, schema)
+	fmt.Printf("  本机地址 : %s\n", strings.Join(hostPorts, " / "))
+	if fwSummary != "" {
+		fmt.Printf("  防火墙   : %s\n", fwSummary)
+	}
+	fmt.Printf("  设备 token: %s\n", c.token)
+	fmt.Printf("  允许提权 : %v\n", c.allowSudo)
+	fmt.Printf("  配置文件 : %s\n", configPath)
+	fmt.Printf("  连接示例 :\n")
+	for _, hp := range hostPorts {
+		fmt.Printf("    rtctl %s <token> 'uptime'   # 从控制机执行\n", hp)
+	}
+	fmt.Printf("⚠️  安全警告: token 即设备全部权限，请勿外泄；公网服务器请配置 tls_cert / tls_key 启用加密传输\n")
+}
+
 func main() {
 	configPath := flag.String("config", "", "配置文件路径（默认 exe 同目录或当前目录的 agent.conf）")
 	initMode := flag.Bool("init", false, "生成 agent.conf（含随机 token）并打印连接信息后退出")
@@ -123,6 +229,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "TLS 证书路径（与 -tls-key 同时提供则启用 WSS）")
 	tlsKey := flag.String("tls-key", "", "TLS 私钥路径")
 	allowSudo := flag.Bool("allow-sudo", false, "允许特权命令（sudo:true 经 sudo 提权；需 sudoers 放行，默认关闭）")
+	openFirewall := flag.Bool("open-firewall", true, "启动时自动放行监听端口（Linux: ufw/firewalld/iptables；Windows: netsh；需 root/管理员或免密 sudo；关闭用 -open-firewall=false）")
 	flag.Parse()
 
 	if *configPath == "" {
@@ -133,6 +240,11 @@ func main() {
 	if *initMode {
 		if _, err := os.Stat(*configPath); err == nil {
 			log.Fatalf("配置文件已存在: %s（如需重新生成请先删除或手动编辑）", *configPath)
+		}
+		if dir := filepath.Dir(*configPath); dir != "." {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				log.Fatalf("创建配置目录失败: %v", err)
+			}
 		}
 		c := cfg{listen: ":8443", id: hostnameOrDefault()}
 		if *listen != "" {
@@ -213,9 +325,20 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("rtctl-agent 启动: id=%s listen=%s tls=%v allow-sudo=%v token=%s（配置: %s）",
-		c.id, c.listen, c.tlsCert != "", c.allowSudo, c.token, *configPath)
-	log.Printf("⚠️  安全警告: token 即设备全部权限，日志已打印 token，请勿外泄；公网服务器请配置 tls_cert / tls_key 启用加密传输")
+	// 启动信息：一条 stderr 日志（供日志采集，不含 token）+ stdout 格式化块（含 token 与本机地址）
+	log.Printf("rtctl-agent 启动: id=%s listen=%s tls=%v allow-sudo=%v（配置: %s）",
+		c.id, c.listen, c.tlsCert != "", c.allowSudo, *configPath)
+
+	// 防火墙：自动放行监听端口（best-effort，失败仅提示，不阻塞启动）
+	fwSum, fwDetail := "", ""
+	if *openFirewall {
+		fr, _ := openFirewallPort(c.listen) // 失败也返回提示文案，一并展示
+		fwSum, fwDetail = fr.summary, fr.detail
+	}
+	if fwDetail != "" {
+		fmt.Println(fwDetail)
+	}
+	printStartup(c, *configPath, fwSum)
 	if err := a.ServeStandalone(ctx, c.listen, c.tlsCert, c.tlsKey); err != nil {
 		log.Fatalf("agent 退出: %v", err)
 	}

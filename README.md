@@ -26,8 +26,19 @@ rtctl 192.168.1.5:8443 你的token 'uptime'
 启动后你会看到类似：
 
 ```text
-rtctl-agent 启动: id=node-01 listen=:8443 tls=false allow-sudo=false token=4a82...（配置: agent.conf）
+rtctl-agent 启动 ✔  (id=node-01)
+  监听地址 : :8443（ws）
+  本机地址 : 192.168.1.5:8443 / 127.0.0.1:8443
+  防火墙   : 已放行 8443/tcp（ufw）
+  设备 token: 4a82...（完整钥匙）
+  允许提权 : false
+  配置文件 : agent.conf
+  连接示例 :
+    rtctl 192.168.1.5:8443 <token> 'uptime'   # 从控制机执行
+⚠️  安全警告: token 即设备全部权限，请勿外泄；公网服务器请配置 tls_cert / tls_key 启用加密传输
 ```
+
+> **防火墙**：启动时会自动放行监听端口（Linux 探测 ufw/firewalld/iptables，Windows 用 netsh）。root/管理员运行，或配置了该命令的免密 sudo，即可自动放行；否则会打印一行现成命令，复制执行就行。不想自动放行：`./rtctl-agent -open-firewall=false`。
 
 **你自己电脑上（把 IP、token 换成上面的）：**
 
@@ -63,7 +74,7 @@ rtctl -json -server ws://IP:8443/ws exec -token <token> -c 'uptime'
 
 ## agent 的配置文件（agent.conf）
 
-第一次运行 `-init` 会自动生成，内容很简单：
+第一次运行 `-init` 会自动生成到 **`~/.rtctl/agent.conf`**（用户主目录下，目录自动创建），内容很简单：
 
 ```ini
 listen = :8443          # 监听端口，0.0.0.0 上的 8443
@@ -74,7 +85,7 @@ tls_key =
 allow_sudo = false      # 是否允许远程执行需要 root 权限的命令
 ```
 
-配置和程序放同一个目录就行；也可以用 `-config` 指定别的路径。
+查找顺序（兼容旧部署）：`~/.rtctl/agent.conf` → exe 同目录 → 当前目录。也可以用 `-config` 指定别的路径。
 
 ## 需要管理员/root 权限的命令怎么办
 
@@ -91,7 +102,7 @@ agent 默认以**当前用户**的身份运行（所以尽量用普通用户跑�
 
 1. **token 就是钥匙**：谁拿到 token 谁就能控制这台服务器，别发群里、别写进代码/脚本提交到仓库。
 2. 建议内网直连；跨公网时**务必**填上 `tls_cert` / `tls_key` 开启加密（否则命令和 token 是明文传输，同一网络的人能截获）。
-3. agent.conf 权限已设为仅本人可读（0600）；启动日志会打印 token，注意日志别外传。
+3. agent.conf 权限已设为仅本人可读（0600）；启动信息会打印 token（stdout），注意输出别外传。
 4. 远程 shell 能力 = 这台机器等同交给你：只在你自己可信的机器上部署。
 
 ## 自己构建

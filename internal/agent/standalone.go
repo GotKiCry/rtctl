@@ -23,12 +23,13 @@ import (
 type standaloneConn struct {
 	ws   *websocket.Conn
 	send chan []byte
-	addr string
+	addr string // 对端 IP:port（来源）
 
-	mu     sync.Mutex
-	execs  map[string]struct{} // 本连接发起的 exec ID
-	shells map[string]struct{} // 本连接打开的 shell 会话
-	puts   map[string]struct{} // 本连接发起的上传
+	mu       sync.Mutex
+	clientID string                // auth 时客户端声明的操作者标识（可为空）
+	execs    map[string]struct{}   // 本连接发起的 exec ID
+	shells   map[string]struct{}   // 本连接打开的 shell 会话
+	puts     map[string]struct{}   // 本连接发起的上传
 }
 
 func newStandaloneConn(ws *websocket.Conn, addr string) *standaloneConn {
@@ -67,6 +68,16 @@ func (c *standaloneConn) SendBlocking(m proto.Msg, timeout time.Duration) error 
 }
 
 func (c *standaloneConn) CloseConn() { c.ws.Close() }
+
+// RemoteAddr 返回对端地址（IP:port），供日志标注来源。
+func (c *standaloneConn) RemoteAddr() string { return c.addr }
+
+// ClientID 返回 auth 时客户端声明的操作者标识（未声明时为空）。
+func (c *standaloneConn) ClientID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.clientID
+}
 
 // Standalone agent 直连模式的 WS 服务端。
 type Standalone struct {
@@ -149,10 +160,18 @@ func (s *Standalone) serveConn(cc *standaloneConn) {
 				cc.Send(em)
 				continue
 			}
+			// 记录客户端声明的操作者标识（client-id），供后续日志标注来源
+			var ap proto.AuthPayload
+			m.PayloadOf(&ap)
+			if id := strings.TrimSpace(ap.ID); id != "" {
+				cc.mu.Lock()
+				cc.clientID = id
+				cc.mu.Unlock()
+			}
 			ack, _ := proto.WithPayload(proto.Msg{Type: proto.TypeAuthAck}, proto.AuthAckPayload{OK: true})
 			cc.Send(ack)
 			authed = true
-			log.Printf("[agent] 直连 client 接入: %s", cc.addr)
+			log.Printf("[agent] 直连 client 接入: %s client=%s", cc.addr, orDash(cc.ClientID()))
 			continue
 		}
 		switch m.Type {
@@ -186,7 +205,7 @@ func (s *Standalone) serveConn(cc *standaloneConn) {
 			if !s.checkToken(cc, m) {
 				continue
 			}
-			a.handleExecKill(m)
+			a.handleExecKill(m, cc)
 		case proto.TypeShellOpen:
 			if !s.checkToken(cc, m) {
 				continue
@@ -218,7 +237,7 @@ func (s *Standalone) serveConn(cc *standaloneConn) {
 			if !s.checkToken(cc, m) {
 				continue
 			}
-			a.handleFileAbort(m)
+			a.handleFileAbort(m, cc)
 		default:
 			em, _ := proto.WithPayload(proto.Msg{Type: proto.TypeError, ID: m.ID},
 				proto.ErrorPayload{Error: "未知消息类型: " + m.Type, Code: proto.ErrorCodeBadPayload})
@@ -278,7 +297,7 @@ func (a *Agent) cleanupStandaloneConn(cc *standaloneConn) {
 	}
 	a.mu.Unlock()
 	if len(execIDs)+len(shellIDs)+len(putIDs) > 0 {
-		log.Printf("[agent] 直连 client %s 断开：清理 exec=%d shell=%d 上传=%d",
-			cc.addr, len(execIDs), len(shellIDs), len(putIDs))
+		log.Printf("[agent] 直连 client %s 断开：清理 exec=%d shell=%d 上传=%d client=%s",
+			cc.addr, len(execIDs), len(shellIDs), len(putIDs), orDash(cc.ClientID()))
 	}
 }

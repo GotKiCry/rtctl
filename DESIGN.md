@@ -166,12 +166,13 @@
 
 | 程序 | 参数 | 默认值 | 说明 |
 |---|---|---|---|
-| agent | `-config` | exe 同目录或当前目录的 agent.conf | 配置文件路径 |
+| agent | `-config` | `~/.rtctl/agent.conf` | 配置文件路径（查找顺序：`-config` > `~/.rtctl/agent.conf` > exe 同目录 > 当前目录；`-init` 默认写入 `~/.rtctl/agent.conf`） |
 | agent | `-init` | — | 生成配置（含随机 token）并打印连接信息 |
 | agent | `-listen` | `:8443` | 监听地址 |
 | agent | `-id` / `-token` | — | 设备编号/钥匙（或环境变量 `RTCTL_ID` / `RTCTL_TOKEN`） |
 | agent | `-tls-cert` / `-tls-key` | 空 | 两个都填 = 开加密（WSS） |
 | agent | `-allow-sudo` | false | 允许 root 特权命令 |
+| agent | `-open-firewall` | true | 启动时自动放行监听端口（best-effort：root/管理员直接执行，否则尝试免密 sudo；失败只提示不阻塞） |
 | rtctl | `-server` | ws://127.0.0.1:8443/ws | 设备地址 |
 | rtctl | `-client-id` | 空 | 记录操作者身份（日志用） |
 | rtctl | `-json` | false | 输出 JSON |

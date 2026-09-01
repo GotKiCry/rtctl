@@ -103,10 +103,26 @@ func writePump(ws *websocket.Conn, send chan []byte) {
 }
 
 // sendSink 响应目标抽象：每条直连客户端连接的响应队列。
+// RemoteAddr/ClientID 供日志标注请求来源（哪个 IP、哪个操作者）。
 type sendSink interface {
 	Send(proto.Msg) error
 	SendBlocking(proto.Msg, time.Duration) error
 	CloseConn() // 关键帧送达失败时断开对应连接
+	RemoteAddr() string // 对端地址（IP:port）
+	ClientID() string   // 客户端 auth 时声明的操作者标识（可为空）
+}
+
+// orDash 空值显示为 "-"，保证日志字段可读。
+func orDash(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "-"
+	}
+	return s
+}
+
+// srcOf 生成日志来源前缀：from=<IP:port> client=<标识>。
+func srcOf(sink sendSink) string {
+	return "from=" + orDash(sink.RemoteAddr()) + " client=" + orDash(sink.ClientID())
 }
 
 // ---- 消息分发 ----
@@ -116,7 +132,7 @@ func (a *Agent) handleMsg(ctx context.Context, m proto.Msg, sink sendSink) {
 	case proto.TypeExec:
 		go a.handleExec(m, sink)
 	case proto.TypeExecKill:
-		a.handleExecKill(m)
+		a.handleExecKill(m, sink)
 	case proto.TypeShellOpen:
 		// 同步创建并注册会话，避免 shell_data 早于注册被丢弃
 		a.handleShellOpen(m, sink)
@@ -130,9 +146,9 @@ func (a *Agent) handleMsg(ctx context.Context, m proto.Msg, sink sendSink) {
 	case proto.TypeFileGet:
 		go a.handleFileGet(m, sink)
 	case proto.TypeFileAbort:
-		a.handleFileAbort(m)
+		a.handleFileAbort(m, sink)
 	default:
-		log.Printf("[agent] 未知消息类型: %s", m.Type)
+		log.Printf("[agent] 未知消息类型 %s: %s", srcOf(sink), m.Type)
 	}
 }
 
@@ -214,11 +230,11 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 		sendExecOutput(sink, m.ID, "", true, 1, "启动进程失败: "+err.Error(), proto.ErrorCodeStartFailed, false)
 		return
 	}
-	// 超时/取消时结束命令和所有子进程（孙进程也一起）
+	// 超时/取消时结束命令和所有子进程（孙进程也一起）。
+	// 结束原因（timeout/killed）由下方结束帧与日志统一带出，此处不重复打印。
 	go func() {
 		<-ctx.Done()
 		if ctx.Err() != nil {
-			log.Printf("[agent] exec 超时/取消，结束命令与子进程 sudo=%v cmd=%s", p.Sudo, p.Cmd)
 			killProcessTree(cmd, p.Sudo)
 		}
 	}()
@@ -228,9 +244,9 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 		pw.Close()
 	}()
 	if p.Sudo {
-		log.Printf("[agent] exec 开始(SUDO): %s", p.Cmd)
+		log.Printf("[agent] exec 开始(SUDO) %s exec=%s: %s", srcOf(sink), m.ID, p.Cmd)
 	} else {
-		log.Printf("[agent] exec 开始: %s", p.Cmd)
+		log.Printf("[agent] exec 开始 %s exec=%s: %s", srcOf(sink), m.ID, p.Cmd)
 	}
 
 	buf := make([]byte, 32*1024)
@@ -288,7 +304,8 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 	if err := sendExecOutputBlocking(sink, m.ID, true, exitCode, errStr, errCode, truncated); err != nil {
 		sink.CloseConn()
 	}
-	log.Printf("[agent] exec 结束: %s exit=%d %s", p.Cmd, exitCode, errStr)
+	log.Printf("[agent] exec 结束 %s exec=%s: %s exit=%d errcode=%s",
+		srcOf(sink), m.ID, p.Cmd, exitCode, orDash(errCode))
 }
 
 func sendExecOutput(sink sendSink, id, data string, done bool, exitCode int, errStr, errCode string, truncated bool) error {
@@ -318,7 +335,7 @@ func sendExecOutputBlocking(sink sendSink, id string, done bool, exitCode int, e
 	return sink.SendBlocking(out, 5*time.Second)
 }
 
-func (a *Agent) handleExecKill(m proto.Msg) {
+func (a *Agent) handleExecKill(m proto.Msg, sink sendSink) {
 	var p proto.ExecKillPayload
 	if err := m.PayloadOf(&p); err != nil {
 		return
@@ -328,6 +345,7 @@ func (a *Agent) handleExecKill(m proto.Msg) {
 	a.mu.Unlock()
 	if ok {
 		cancel()
+		log.Printf("[agent] exec_kill %s exec=%s", srcOf(sink), p.ExecID)
 	}
 }
 
@@ -372,7 +390,7 @@ func (a *Agent) handleFilePut(m proto.Msg, sink sendSink) {
 	a.mu.Lock()
 	a.putFiles[m.ID] = st
 	a.mu.Unlock()
-	log.Printf("[agent] file_put 开始: %s (%d 字节)", p.Path, p.Size)
+	log.Printf("[agent] file_put 开始 %s id=%s: %s (%d 字节)", srcOf(sink), m.ID, p.Path, p.Size)
 }
 
 func (a *Agent) handleFilePutChunk(m proto.Msg) {
@@ -421,7 +439,7 @@ func (a *Agent) handleFilePutChunk(m proto.Msg) {
 	}
 	a.removeFilePut(m.ID)
 	sendFilePutAck(st.sink, m.ID, true, "")
-	log.Printf("[agent] file_put 完成: %s (%d 字节)", st.path, st.written)
+	log.Printf("[agent] file_put 完成 %s id=%s: %s (%d 字节)", srcOf(st.sink), m.ID, st.path, st.written)
 }
 
 func (a *Agent) failFilePut(id string, st *filePutState, why string) {
@@ -431,7 +449,7 @@ func (a *Agent) failFilePut(id string, st *filePutState, why string) {
 	os.Remove(st.tmpPath)
 	a.removeFilePut(id)
 	sendFilePutAck(st.sink, id, false, why)
-	log.Printf("[agent] file_put 失败: %s (%s)", st.path, why)
+	log.Printf("[agent] file_put 失败 %s id=%s: %s (%s)", srcOf(st.sink), id, st.path, why)
 }
 
 func (a *Agent) removeFilePut(id string) {
@@ -469,10 +487,11 @@ func (a *Agent) handleFileGet(m proto.Msg, sink sendSink) {
 			code = proto.ErrorCodeNotFound
 		}
 		sendFileGetChunk(sink, m.ID, 0, "", true, msg, code)
+		log.Printf("[agent] file_get 失败 %s id=%s: %s (%s)", srcOf(sink), m.ID, p.Path, msg)
 		return
 	}
 	defer f.Close()
-	log.Printf("[agent] file_get 开始: %s", p.Path)
+	log.Printf("[agent] file_get 开始 %s id=%s: %s", srcOf(sink), m.ID, p.Path)
 	buf := make([]byte, fileChunkSize)
 	seq, total := 0, 0
 	for {
@@ -481,6 +500,7 @@ func (a *Agent) handleFileGet(m proto.Msg, sink sendSink) {
 			total += n
 			if total > maxFileSize {
 				sendFileGetChunk(sink, m.ID, seq, "", true, fmt.Sprintf("文件过大（上限 %dMB）", maxFileSize>>20), "")
+				log.Printf("[agent] file_get 失败 %s id=%s: %s (文件过大)", srcOf(sink), m.ID, p.Path)
 				return
 			}
 			sendFileGetChunk(sink, m.ID, seq, base64.StdEncoding.EncodeToString(buf[:n]), false, "", "")
@@ -488,11 +508,12 @@ func (a *Agent) handleFileGet(m proto.Msg, sink sendSink) {
 		}
 		if rerr == io.EOF {
 			sendFileGetChunk(sink, m.ID, seq, "", true, "", "")
-			log.Printf("[agent] file_get 完成: %s (%d 字节)", p.Path, total)
+			log.Printf("[agent] file_get 完成 %s id=%s: %s (%d 字节)", srcOf(sink), m.ID, p.Path, total)
 			return
 		}
 		if rerr != nil {
 			sendFileGetChunk(sink, m.ID, seq, "", true, "读取失败: "+rerr.Error(), "")
+			log.Printf("[agent] file_get 失败 %s id=%s: %s (%s)", srcOf(sink), m.ID, p.Path, rerr.Error())
 			return
 		}
 	}
@@ -507,7 +528,7 @@ func sendFileGetChunk(sink sendSink, id string, seq int, data string, done bool,
 }
 
 // handleFileAbort client 取消上传：清理临时文件。
-func (a *Agent) handleFileAbort(m proto.Msg) {
+func (a *Agent) handleFileAbort(m proto.Msg, sink sendSink) {
 	a.mu.Lock()
 	st := a.putFiles[m.ID]
 	a.mu.Unlock()
@@ -519,7 +540,7 @@ func (a *Agent) handleFileAbort(m proto.Msg) {
 	}
 	os.Remove(st.tmpPath)
 	a.removeFilePut(m.ID)
-	log.Printf("[agent] file_put 取消: %s", st.path)
+	log.Printf("[agent] file_put 取消 %s id=%s: %s", srcOf(sink), m.ID, st.path)
 }
 
 // ---- shell 交互终端 ----
@@ -569,7 +590,7 @@ func (a *Agent) handleShellOpen(m proto.Msg, sink sendSink) {
 	ack, _ := proto.WithPayload(proto.Msg{Type: proto.TypeShellAck, SessionID: sid},
 		proto.ShellAckPayload{OK: true})
 	sink.Send(ack)
-	log.Printf("[agent] shell 打开: 会话=%s", sid)
+	log.Printf("[agent] shell 打开 %s session=%s", srcOf(sink), sid)
 
 	// 进程输出 -> 上行消息
 	go func() {

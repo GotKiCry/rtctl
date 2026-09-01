@@ -27,6 +27,10 @@ func (f *fakeSink) SendBlocking(m proto.Msg, _ time.Duration) error { return f.S
 
 func (f *fakeSink) CloseConn() {}
 
+func (f *fakeSink) RemoteAddr() string { return "test:0" }
+
+func (f *fakeSink) ClientID() string { return "tester" }
+
 func (f *fakeSink) snapshot() []proto.Msg {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -240,5 +244,5 @@ func TestFilePutIDConflict(t *testing.T) {
 	if ok2 || !strings.Contains(err2, proto.ErrorCodeConflict) {
 		t.Errorf("第二次 file_put 应冲突拒绝: ok=%v err=%q", ok2, err2)
 	}
-	a.handleFileAbort(proto.Msg{Type: proto.TypeFileAbort, ID: "dup-put"})
+	a.handleFileAbort(proto.Msg{Type: proto.TypeFileAbort, ID: "dup-put"}, s1)
 }

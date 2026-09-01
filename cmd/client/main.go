@@ -38,6 +38,7 @@ var (
 	serverURL string
 	clientID  string
 	jsonMode  bool
+	quietMode bool // 关闭执行上下文摘要（stdout 始终纯命令输出）
 )
 
 // execResult exec 的 JSON 结果（-json 模式输出）。
@@ -55,6 +56,7 @@ func main() {
 	fs.StringVar(&serverURL, "server", "ws://127.0.0.1:8443/ws", "设备地址（agent 直连地址）")
 	fs.StringVar(&clientID, "client-id", "", "操作者/Agent 标识（记日志用）")
 	fs.BoolVar(&jsonMode, "json", false, "结构化输出（list / exec）")
+	fs.BoolVar(&quietMode, "quiet", false, "关闭执行上下文摘要（不打印目标地址/命令/耗时）")
 	fs.Parse(os.Args[1:])
 
 	args := fs.Args()
@@ -100,7 +102,24 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, "rtctl - 远程终端控制端\n\n用法:\n  rtctl <host:port> <token> <命令...>                     # 快捷: 直接执行一条命令\n  rtctl [全局参数] list\n  rtctl [全局参数] exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-sudo] [-confirm-sudo] [-c 命令 | 命令...]\n  rtctl [全局参数] shell -token <设备token>\n  rtctl [全局参数] file-put -token <设备token> [-mode 0644] <本地文件> <远端路径>\n  rtctl [全局参数] file-get -token <设备token> <远端路径> <本地文件>\n\n快速上手:\n  # 目标机: ./rtctl-agent -init 生成配置后自动带监听\n  # 本机:   rtctl 192.168.1.5:8443 <token> 'uptime'\n\n全局参数:\n  -server    设备地址（agent 直连地址，默认 ws://127.0.0.1:8443/ws）\n  -client-id 操作者/Agent 标识（记日志用）\n  -json      结构化输出（list / exec 生效）\n\n特权命令（-sudo）:\n  需被控端 agent 开启 -allow-sudo；交互下 CLI 会向用户当面确认，非交互须显式 -confirm-sudo。\n")
+	fmt.Fprint(os.Stderr, "rtctl - 远程终端控制端\n\n用法:\n  rtctl <host:port> <token> <命令...>                     # 快捷: 直接执行一条命令\n  rtctl [全局参数] list\n  rtctl [全局参数] exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-sudo] [-confirm-sudo] [-c 命令 | 命令...]\n  rtctl [全局参数] shell -token <设备token>\n  rtctl [全局参数] file-put -token <设备token> [-mode 0644] <本地文件> <远端路径>\n  rtctl [全局参数] file-get -token <设备token> <远端路径> <本地文件>\n\n快速上手:\n  # 目标机: ./rtctl-agent -init 生成配置后自动带监听\n  # 本机:   rtctl 192.168.1.5:8443 <token> 'uptime'\n\n全局参数:\n  -server    设备地址（agent 直连地址，默认 ws://127.0.0.1:8443/ws）\n  -client-id 操作者/Agent 标识（记日志用）\n  -json      结构化输出（list / exec 生效）\n  -quiet     关闭执行上下文摘要（目标地址/命令/耗时打印在 stderr，不污染命令输出）\n\n特权命令（-sudo）:\n  需被控端 agent 开启 -allow-sudo；交互下 CLI 会向用户当面确认，非交互须显式 -confirm-sudo。\n")
+}
+
+// orDashID 空标识显示为 "-"。
+func orDashID(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "-"
+	}
+	return s
+}
+
+// clip 按 rune 截断长字符串（显示前 n 个字符 + 省略号），用于摘要行。
+func clip(s string, n int) string {
+	rs := []rune(s)
+	if len(rs) <= n {
+		return s
+	}
+	return string(rs[:n]) + "…"
 }
 
 func printJSONError(err error) {
@@ -252,6 +271,11 @@ func cmdExec(args []string) error {
 	if err := conn.WriteJSON(m); err != nil {
 		return err
 	}
+	// 执行上下文摘要（stderr，不污染命令输出；-json/-quiet 时关闭）
+	if !jsonMode && !quietMode {
+		fmt.Fprintf(os.Stderr, "→ %s | client=%s | exec: %s\n",
+			serverURL, orDashID(clientID), clip(cmdStr, 80))
+	}
 
 	// 客户端读超时：避免 server/agent 异常时永久挂起
 	if *deadlineSec > 0 {
@@ -273,6 +297,7 @@ func cmdExec(args []string) error {
 
 	start := time.Now()
 	var sb strings.Builder
+	lastNL := true // 上一条输出是否以换行结尾（避免摘要/告警与命令输出粘行）
 	for {
 		var msg proto.Msg
 		if err := conn.ReadJSON(&msg); err != nil {
@@ -291,14 +316,30 @@ func cmdExec(args []string) error {
 				sb.WriteString(p.Data)
 			} else {
 				fmt.Print(p.Data)
+				if p.Data != "" {
+					lastNL = strings.HasSuffix(p.Data, "\n")
+				}
 			}
 			if p.Done {
 				if !jsonMode {
+					if !lastNL {
+						fmt.Fprintln(os.Stderr) // 先断开粘行
+						lastNL = true
+					}
 					if p.Truncated {
-						fmt.Fprintln(os.Stderr, "\n[警告: 输出太多，已截断]")
+						fmt.Fprintln(os.Stderr, "[警告: 输出太多，已截断]")
 					}
 					if p.Error != "" {
-						fmt.Fprintf(os.Stderr, "\n[%s]\n", p.Error)
+						fmt.Fprintf(os.Stderr, "[%s]\n", p.Error)
+					}
+					if !quietMode {
+						if p.ErrorCode != "" {
+							fmt.Fprintf(os.Stderr, "← exit=%d errcode=%s 耗时=%dms\n",
+								p.ExitCode, p.ErrorCode, time.Since(start).Milliseconds())
+						} else {
+							fmt.Fprintf(os.Stderr, "← exit=%d 耗时=%dms\n",
+								p.ExitCode, time.Since(start).Milliseconds())
+						}
 					}
 				}
 				if jsonMode {
@@ -368,7 +409,8 @@ func cmdShell(args []string) error {
 		}
 	}
 
-	fmt.Println("=== 已进入远程终端（输入 exit 退出，Ctrl+D 断开）===")
+	fmt.Printf("=== 已进入远程终端 %s（client=%s，输入 exit 退出，Ctrl+D 断开）===\n",
+		serverURL, orDashID(clientID))
 
 	// 本地终端进入 raw 模式，把键盘输入原样转发
 	fd := int(os.Stdin.Fd())
