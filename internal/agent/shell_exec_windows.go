@@ -8,7 +8,8 @@ import "syscall"
 // 若走默认 argv 引用，Go 的转义与 cmd.exe 引号规则冲突，
 // 嵌套双引号会被剥掉导致命令被静默错误执行。
 // sudo 参数忽略：Windows 计划任务本身以 SYSTEM 运行（已是最高权限）。
-func shellExecArgs(cmd string, sudo bool) ([]string, *syscall.SysProcAttr) {
+// sudoPw 同样忽略（Windows 无 sudo）。
+func shellExecArgs(cmd string, sudo bool, sudoPw string) ([]string, *syscall.SysProcAttr) {
 	return []string{"cmd", "/C", cmd}, &syscall.SysProcAttr{CmdLine: windowsCmdLine(cmd)}
 }
 

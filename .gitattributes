@@ -1,0 +1,6 @@
+# 行尾统一：脚本、Go 源码与校验清单必须是 LF
+# （Windows 侧 Set-Content / 编辑器默认 CRLF 会破坏 sha256sum -c 与 sh 解析）
+*.sh text eol=lf
+*.go text eol=lf
+*.md text eol=lf
+SHA256SUMS.txt text eol=lf

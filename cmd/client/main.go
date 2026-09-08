@@ -16,6 +16,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -34,11 +36,16 @@ import (
 	"rtctl/internal/proto"
 )
 
+// version 客户端版本号（构建时经 -ldflags "-X main.version=<tag>" 注入）。
+var version = "dev"
+
 var (
-	serverURL string
-	clientID  string
-	jsonMode  bool
-	quietMode bool // 关闭执行上下文摘要（stdout 始终纯命令输出）
+	serverURL   string
+	clientID    string
+	jsonMode    bool
+	quietMode   bool   // 关闭执行上下文摘要（stdout 始终纯命令输出）
+	caFile      string // 自定义 CA 证书文件（自签 / 私有 CA 场景）
+	insecureTLS bool   // 跳过 TLS 证书校验（仅调试用）
 )
 
 // execResult exec 的 JSON 结果（-json 模式输出）。
@@ -57,7 +64,15 @@ func main() {
 	fs.StringVar(&clientID, "client-id", "", "操作者/Agent 标识（记日志用）")
 	fs.BoolVar(&jsonMode, "json", false, "结构化输出（list / exec）")
 	fs.BoolVar(&quietMode, "quiet", false, "关闭执行上下文摘要（不打印目标地址/命令/耗时）")
+	fs.StringVar(&caFile, "cafile", "", "自定义 CA 证书文件（自签 / 私有 CA 场景）")
+	fs.BoolVar(&insecureTLS, "insecure", false, "跳过 TLS 证书校验（仅调试用，勿用于生产）")
+	showVersion := fs.Bool("version", false, "打印版本后退出")
 	fs.Parse(os.Args[1:])
+
+	if *showVersion {
+		fmt.Printf("rtctl %s\n", version)
+		return
+	}
 
 	args := fs.Args()
 	if len(args) == 0 {
@@ -142,8 +157,28 @@ func normalizeServer(addr string) string {
 }
 
 // connect 连接服务器并完成认证，返回就绪的连接。
+// wss:// 且指定 -cafile / -insecure 时使用自定义 TLS 配置（自签证书场景必需）。
 func connect() (*websocket.Conn, error) {
-	conn, _, err := websocket.DefaultDialer.Dial(serverURL, nil)
+	dialer := *websocket.DefaultDialer
+	if strings.HasPrefix(serverURL, "wss://") && (caFile != "" || insecureTLS) {
+		tlsConf := &tls.Config{MinVersion: tls.VersionTLS12}
+		if insecureTLS {
+			tlsConf.InsecureSkipVerify = true
+		}
+		if caFile != "" {
+			pemBytes, rerr := os.ReadFile(caFile)
+			if rerr != nil {
+				return nil, rerr
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(pemBytes) {
+				return nil, fmt.Errorf("无法解析 CA 文件: %s", caFile)
+			}
+			tlsConf.RootCAs = pool
+		}
+		dialer.TLSClientConfig = tlsConf
+	}
+	conn, _, err := dialer.Dial(serverURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -222,6 +257,8 @@ func cmdExec(args []string) error {
 	rawCmd := sub.String("c", "", "原样命令字符串（不再拼接参数）")
 	sudo := sub.Bool("sudo", false, "请求 root 提权执行（需被控端已开启 -allow-sudo；交互下会向用户确认）")
 	confirmSudo := sub.Bool("confirm-sudo", false, "非交互场景下确认特权命令（等价于用户批准）")
+	sudoAsk := sub.Bool("sudo-ask", false, "临时提权：交互提示输入 root 密码（不依赖 sudoers 免密规则）")
+	sudoPwStdin := sub.Bool("sudo-password-stdin", false, "临时提权：从标准输入读取 root 密码（脚本调用用）")
 	sub.Parse(args)
 	rest := sub.Args()
 	if *token == "" || (*rawCmd == "" && len(rest) == 0) {
@@ -247,6 +284,35 @@ func cmdExec(args []string) error {
 			return errors.New("用户取消特权命令")
 		}
 	}
+	// 临时提权（临时授权）：当场读取 root 密码，随请求发给 agent，由 agent 用 `sudo -S` 使用。
+	// 永久授权则不需要密码：agent 侧 sudoers 有 NOPASSWD 规则时直接 `sudo -n` 成功。
+	sudoPw := ""
+	if *sudoAsk || *sudoPwStdin {
+		if !*sudo {
+			return errors.New("-sudo-ask / -sudo-password-stdin 必须与 -sudo 一起使用")
+		}
+		if *sudoPwStdin {
+			b, rerr := io.ReadAll(os.Stdin)
+			if rerr != nil {
+				return rerr
+			}
+			sudoPw = strings.TrimRight(string(b), "\r\n")
+		} else {
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
+				return errors.New("需要终端才能提示输入 root 密码；脚本调用请改用 -sudo-password-stdin")
+			}
+			fmt.Fprint(os.Stderr, "root 密码: ")
+			b, rerr := term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Fprintln(os.Stderr)
+			if rerr != nil {
+				return rerr
+			}
+			sudoPw = string(b)
+		}
+		if sudoPw == "" {
+			return errors.New("未输入 root 密码")
+		}
+	}
 	var stdinData string
 	if *stdinFile != "" {
 		b, err := os.ReadFile(*stdinFile)
@@ -264,7 +330,7 @@ func cmdExec(args []string) error {
 
 	execID := idutil.New()
 	m := proto.Msg{Type: proto.TypeExec, Token: *token, ID: execID}
-	m, err = proto.WithPayload(m, proto.ExecPayload{Cmd: cmdStr, TimeoutMS: *timeoutMS, Workdir: *workdir, Stdin: stdinData, Sudo: *sudo})
+	m, err = proto.WithPayload(m, proto.ExecPayload{Cmd: cmdStr, TimeoutMS: *timeoutMS, Workdir: *workdir, Stdin: stdinData, Sudo: *sudo, SudoPassword: sudoPw})
 	if err != nil {
 		return err
 	}

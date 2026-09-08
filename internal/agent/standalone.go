@@ -85,17 +85,33 @@ type Standalone struct {
 }
 
 // ServeStandalone 启动直连监听（阻塞直到 ctx 取消或服务出错）。
-func (a *Agent) ServeStandalone(ctx context.Context, listen, tlsCert, tlsKey string) error {
+// wsPath 为 WebSocket 路径（默认 /ws）；反向代理/路径前缀场景可改，
+// 例如 -ws-path /rt/ws，此时健康检查同时注册在 /rt/healthz。
+func (a *Agent) ServeStandalone(ctx context.Context, listen, tlsCert, tlsKey, wsPath string) error {
+	if wsPath == "" {
+		wsPath = "/ws"
+	}
+	if !strings.HasPrefix(wsPath, "/") {
+		wsPath = "/" + wsPath
+	}
+	health := "/healthz"
 	s := &Standalone{agent: a}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", s.handleWS)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+	healthHandler := func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }
+	mux.HandleFunc(wsPath, s.handleWS)
+	mux.HandleFunc(health, healthHandler)
+	// 路径前缀场景：反代未重写路径时，外部 /rt/healthz 直通到 agent。
+	if dir := strings.TrimSuffix(wsPath, "/ws"); dir != "" && dir != wsPath {
+		health = dir + "/healthz"
+		mux.HandleFunc(health, healthHandler)
+	}
 	srv := &http.Server{Addr: listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	go func() {
 		<-ctx.Done()
 		srv.Close()
 	}()
-	log.Printf("[agent] 直连模式监听 %s（无需中继；连接需持有设备 token）", listen)
+	log.Printf("[agent] 直连模式监听 %s（ws 路径 %s，健康检查 %s；无需中继，连接需持有设备 token）",
+		listen, wsPath, health)
 	if tlsCert != "" {
 		return srv.ListenAndServeTLS(tlsCert, tlsKey)
 	}

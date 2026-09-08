@@ -37,6 +37,7 @@ type cfg struct {
 	tlsCert   string
 	tlsKey    string
 	allowSudo bool
+	wsPath    string
 }
 
 // firewallResult 各平台 firewall_*.go 的 openFirewallPort 返回值：
@@ -77,6 +78,8 @@ func loadConfig(path string) (cfg, error) {
 			c.tlsKey = strings.TrimSpace(v)
 		case "allow_sudo":
 			c.allowSudo, _ = strconv.ParseBool(strings.TrimSpace(v))
+		case "ws_path":
+			c.wsPath = strings.TrimSpace(v)
 		}
 	}
 	return c, sc.Err()
@@ -90,7 +93,8 @@ func writeConfig(path string, c cfg) error {
 		"token = %s\n"+
 		"tls_cert = %s\n"+
 		"tls_key = %s\n"+
-		"allow_sudo = %v\n", c.listen, c.id, c.token, c.tlsCert, c.tlsKey, c.allowSudo)
+		"allow_sudo = %v\n"+
+		"ws_path = %s\n", c.listen, c.id, c.token, c.tlsCert, c.tlsKey, c.allowSudo, c.wsPath)
 	return os.WriteFile(path, []byte(content), 0o600)
 }
 
@@ -181,10 +185,15 @@ func localIPv4s() []string {
 }
 
 // printStartup 格式化打印启动信息：监听地址、本机可用地址、防火墙状态、连接示例。
-func printStartup(c cfg, configPath, fwSummary string) {
+// showToken=false 时不打印 token（避免 token 进入日志采集，如 journald）。
+func printStartup(c cfg, configPath, fwSummary string, showToken bool) {
 	schema := "ws"
 	if c.tlsCert != "" {
 		schema = "wss"
+	}
+	wsPath := c.wsPath
+	if wsPath == "" {
+		wsPath = "/ws"
 	}
 	host, port, perr := net.SplitHostPort(c.listen)
 	if perr != nil {
@@ -205,17 +214,25 @@ func printStartup(c cfg, configPath, fwSummary string) {
 	}
 
 	fmt.Printf("rtctl-agent 启动 ✔  (id=%s)\n", c.id)
-	fmt.Printf("  监听地址 : %s（%s）\n", c.listen, schema)
+	fmt.Printf("  监听地址 : %s（%s，路径 %s）\n", c.listen, schema, wsPath)
 	fmt.Printf("  本机地址 : %s\n", strings.Join(hostPorts, " / "))
 	if fwSummary != "" {
 		fmt.Printf("  防火墙   : %s\n", fwSummary)
 	}
-	fmt.Printf("  设备 token: %s\n", c.token)
+	if showToken {
+		fmt.Printf("  设备 token: %s\n", c.token)
+	} else {
+		fmt.Printf("  设备 token: <已隐藏>（查看: rt token show）\n")
+	}
 	fmt.Printf("  允许提权 : %v\n", c.allowSudo)
 	fmt.Printf("  配置文件 : %s\n", configPath)
 	fmt.Printf("  连接示例 :\n")
 	for _, hp := range hostPorts {
-		fmt.Printf("    rtctl %s <token> 'uptime'   # 从控制机执行\n", hp)
+		if wsPath == "/ws" {
+			fmt.Printf("    rtctl %s <token> 'uptime'   # 从控制机执行\n", hp)
+		} else {
+			fmt.Printf("    rtctl -server %s://%s%s exec -token <token> -c 'uptime'   # 自定义路径\n", schema, hp, wsPath)
+		}
 	}
 	fmt.Printf("⚠️  安全警告: token 即设备全部权限，请勿外泄；公网服务器请配置 tls_cert / tls_key 启用加密传输\n")
 }
@@ -230,7 +247,15 @@ func main() {
 	tlsKey := flag.String("tls-key", "", "TLS 私钥路径")
 	allowSudo := flag.Bool("allow-sudo", false, "允许特权命令（sudo:true 经 sudo 提权；需 sudoers 放行，默认关闭）")
 	openFirewall := flag.Bool("open-firewall", true, "启动时自动放行监听端口（Linux: ufw/firewalld/iptables；Windows: netsh；需 root/管理员或免密 sudo；关闭用 -open-firewall=false）")
+	wsPath := flag.String("ws-path", "", "WebSocket 路径（默认 /ws；反向代理/路径前缀场景可改，如 /rt/ws）")
+	printToken := flag.Bool("print-token", true, "启动时在标准输出打印完整设备 token（设为 false 可避免 token 进入日志采集）")
+	showVersion := flag.Bool("version", false, "打印版本后退出")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("rtctl-agent %s\n", agent.Version)
+		return
+	}
 
 	if *configPath == "" {
 		*configPath = defaultConfigPath()
@@ -267,6 +292,7 @@ func main() {
 			c.token = t
 		}
 		c.tlsCert, c.tlsKey, c.allowSudo = *tlsCert, *tlsKey, *allowSudo
+		c.wsPath = *wsPath
 		if err := writeConfig(*configPath, c); err != nil {
 			log.Fatalf("写入配置失败: %v", err)
 		}
@@ -312,6 +338,9 @@ func main() {
 	if *allowSudo {
 		c.allowSudo = true
 	}
+	if *wsPath != "" {
+		c.wsPath = *wsPath
+	}
 
 	if c.id == "" || c.token == "" {
 		log.Fatalf("缺少设备 ID/token：编辑 %s 或运行 %s -init 自动生成（也可 -id/-token 或环境变量 RTCTL_ID/RTCTL_TOKEN）", *configPath, os.Args[0])
@@ -338,8 +367,8 @@ func main() {
 	if fwDetail != "" {
 		fmt.Println(fwDetail)
 	}
-	printStartup(c, *configPath, fwSum)
-	if err := a.ServeStandalone(ctx, c.listen, c.tlsCert, c.tlsKey); err != nil {
+	printStartup(c, *configPath, fwSum, *printToken)
+	if err := a.ServeStandalone(ctx, c.listen, c.tlsCert, c.tlsKey, c.wsPath); err != nil {
 		log.Fatalf("agent 退出: %v", err)
 	}
 }

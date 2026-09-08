@@ -22,8 +22,8 @@ import (
 	"rtctl/internal/proto"
 )
 
-// Version agent 版本号。
-const Version = "3.2.0"
+// Version agent 版本号（构建时经 -ldflags "-X rtctl/internal/agent.Version=<tag>" 注入）。
+var Version = "dev"
 
 const (
 	maxConcurrentExec  = 32 // 单设备并发 exec 上限
@@ -198,7 +198,7 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 		a.mu.Unlock()
 	}()
 
-	argv, sysProc := shellExecArgs(p.Cmd, p.Sudo)
+	argv, sysProc := shellExecArgs(p.Cmd, p.Sudo, p.SudoPassword)
 	// sudo 路径不能用 CommandContext：ctx 取消时它会抢先杀掉直接子进程 sudo，
 	// 而 sudo 已把 /bin/sh 与孙进程放进新会话/进程组，剩下的树会漏杀。
 	// 这里用普通 exec.Command，由下方 kill goroutine 统一经 /proc 遍历杀整树。
@@ -214,7 +214,11 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 	if p.Workdir != "" {
 		cmd.Dir = p.Workdir
 	}
-	if p.Stdin != "" {
+	// 临时提权：sudo -S 从 stdin 首行读密码，其后接调用方指定的输入。
+	switch {
+	case p.SudoPassword != "":
+		cmd.Stdin = strings.NewReader(p.SudoPassword + "\n" + p.Stdin)
+	case p.Stdin != "":
 		cmd.Stdin = strings.NewReader(p.Stdin)
 	}
 	pr, pw, perr := os.Pipe()
@@ -314,13 +318,17 @@ func sendExecOutput(sink sendSink, id, data string, done bool, exitCode int, err
 	return sink.Send(out)
 }
 
-// sudoFailureMark 判断输出开头是否为 sudo -n 的典型失败信息。
+// sudoFailureMark 判断输出开头是否为 sudo 的典型失败信息
+// （既覆盖 sudo -n 的无免密规则，也覆盖 sudo -S 的密码错误）。
 func sudoFailureMark(head string) bool {
 	for _, m := range []string{
 		"a password is required",
 		"not allowed to run sudo",
 		"no new privileges",
 		"sudoers",
+		"Sorry, try again",
+		"incorrect password",
+		"Authentication failure",
 	} {
 		if strings.Contains(head, m) {
 			return true

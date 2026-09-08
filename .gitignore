@@ -10,3 +10,7 @@ deploy/*.xml
 
 # 构建产物（build.ps1 生成；SHA256SUMS.txt 随产物一起，不入库）
 bin/
+
+# Go 本地缓存（受限环境构建时指向工作区内）
+.gocache/
+.gotelemetry/
