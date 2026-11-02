@@ -1,10 +1,11 @@
 // rtctl-agent 被控端：部署在目标 Linux / Windows 设备上。
 // 直连模式：agent 自带 WS 服务端，本机 client 直接连接。
 //
-// 启动方式（二选一）：
+// 启动方式：
 //
-//	./rtctl-agent            # 读同目录 agent.conf（或用 -config 指定路径）
 //	./rtctl-agent -init      # 生成 agent.conf（含随机 token）并打印连接信息
+//	./rtctl-agent            # 后台运行，确认监听就绪后返回
+//	./rtctl-agent -foreground # 前台运行，供调试或服务管理器托管
 //	./rtctl-agent -listen :8443 -id node-01 -token <token>   # 纯命令行
 package main
 
@@ -12,6 +13,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -25,6 +27,7 @@ import (
 	"syscall"
 
 	"rtctl/internal/agent"
+	"rtctl/internal/console"
 )
 
 const configName = "agent.conf"
@@ -237,8 +240,29 @@ func printStartup(c cfg, configPath, fwSummary string, showToken bool) {
 	fmt.Printf("⚠️  安全警告: token 即设备全部权限，请勿外泄；公网服务器请配置 tls_cert / tls_key 启用加密传输\n")
 }
 
+type runtimeOptions struct {
+	configPath   string
+	listen       string
+	id           string
+	token        string
+	tlsCert      string
+	tlsKey       string
+	wsPath       string
+	allowSudo    bool
+	openFirewall bool
+	printToken   bool
+	foreground   bool
+	logFile      string
+	pidFile      string
+	daemonReady  string
+}
+
 func main() {
-	configPath := flag.String("config", "", "配置文件路径（默认 exe 同目录或当前目录的 agent.conf）")
+	os.Exit(runMain())
+}
+
+func runMain() int {
+	configPath := flag.String("config", "", "配置文件路径（默认 ~/.rtctl/agent.conf，兼容 exe 同目录和当前目录）")
 	initMode := flag.Bool("init", false, "生成 agent.conf（含随机 token）并打印连接信息后退出")
 	listen := flag.String("listen", "", "监听地址（如 :8443；缺省取配置/默认 :8443）")
 	id := flag.String("id", "", "设备 ID（或环境变量 RTCTL_ID）")
@@ -248,27 +272,37 @@ func main() {
 	allowSudo := flag.Bool("allow-sudo", false, "允许特权命令（sudo:true 经 sudo 提权；需 sudoers 放行，默认关闭）")
 	openFirewall := flag.Bool("open-firewall", true, "启动时自动放行监听端口（Linux: ufw/firewalld/iptables；Windows: netsh；需 root/管理员或免密 sudo；关闭用 -open-firewall=false）")
 	wsPath := flag.String("ws-path", "", "WebSocket 路径（默认 /ws；反向代理/路径前缀场景可改，如 /rt/ws）")
-	printToken := flag.Bool("print-token", true, "启动时在标准输出打印完整设备 token（设为 false 可避免 token 进入日志采集）")
+	printToken := flag.Bool("print-token", true, "启动信息打印完整设备 token（设为 false 可避免 token 进入终端或日志采集）")
 	showVersion := flag.Bool("version", false, "打印版本后退出")
+	foreground := flag.Bool("foreground", false, "前台运行（供调试或服务管理器托管；运行日志仍写入文件）")
+	statusMode := flag.Bool("status", false, "查询本机 agent 运行状态后退出")
+	stopMode := flag.Bool("stop", false, "停止 PID 文件对应的本机 agent 后退出")
+	logsMode := flag.Bool("logs", false, "查看运行日志后退出（-follow 跟随，-lines 指定行数，-no-color 关闭颜色）")
+	followLogs := flag.Bool("follow", false, "跟随日志输出（仅与 -logs 一起使用）")
+	logLines := flag.Int("lines", 100, "-logs 显示的最后行数（仅与 -logs 一起使用）")
+	noColor := flag.Bool("no-color", false, "禁用日志颜色（仅与 -logs 一起使用；NO_COLOR 环境变量同样生效）")
+	logFile := flag.String("log-file", defaultRuntimePath("agent.log"), "运行日志文件（每个约 10MB，保留 3 个轮转备份）")
+	pidFile := flag.String("pid-file", defaultRuntimePath("agent.pid"), "本机 agent 的 PID 文件")
+	daemonReady := flag.String("daemon-ready", "", "内部使用：后台子进程的就绪通知文件")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Printf("rtctl-agent %s\n", agent.Version)
-		return
+		return 0
 	}
-
 	if *configPath == "" {
 		*configPath = defaultConfigPath()
 	}
 
-	// ---- -init：生成配置并打印连接信息 ----
 	if *initMode {
 		if _, err := os.Stat(*configPath); err == nil {
-			log.Fatalf("配置文件已存在: %s（如需重新生成请先删除或手动编辑）", *configPath)
+			log.Printf("配置文件已存在: %s（如需重新生成请先删除或手动编辑）", *configPath)
+			return 1
 		}
 		if dir := filepath.Dir(*configPath); dir != "." {
 			if err := os.MkdirAll(dir, 0o700); err != nil {
-				log.Fatalf("创建配置目录失败: %v", err)
+				log.Printf("创建配置目录失败: %v", err)
+				return 1
 			}
 		}
 		c := cfg{listen: ":8443", id: hostnameOrDefault()}
@@ -287,14 +321,16 @@ func main() {
 		} else {
 			t, err := genToken()
 			if err != nil {
-				log.Fatalf("生成 token 失败: %v", err)
+				log.Printf("生成 token 失败: %v", err)
+				return 1
 			}
 			c.token = t
 		}
 		c.tlsCert, c.tlsKey, c.allowSudo = *tlsCert, *tlsKey, *allowSudo
 		c.wsPath = *wsPath
 		if err := writeConfig(*configPath, c); err != nil {
-			log.Fatalf("写入配置失败: %v", err)
+			log.Printf("写入配置失败: %v", err)
+			return 1
 		}
 		fmt.Printf("✔ 配置已生成: %s\n", *configPath)
 		fmt.Printf("  设备 ID      : %s\n", c.id)
@@ -302,75 +338,218 @@ func main() {
 		fmt.Printf("  设备 token  : %s\n", c.token)
 		fmt.Printf("\n本机连接示例（把 <IP> 换成目标机地址）:\n  rtctl <IP>%s <token> 'uptime'\n", c.listen)
 		fmt.Printf("\n⚠️  安全警告: token 即设备全部权限，请仅通过安全渠道保存/分享；\n   公网服务器建议配置 tls_cert / tls_key 启用加密传输。\n")
-		return
+		return 0
 	}
 
-	// ---- 启动：flag > 配置文件 > 环境变量 > 默认 ----
+	opts := runtimeOptions{
+		configPath: *configPath, listen: *listen, id: *id, token: *token,
+		tlsCert: *tlsCert, tlsKey: *tlsKey, wsPath: *wsPath,
+		allowSudo: *allowSudo, openFirewall: *openFirewall, printToken: *printToken,
+		foreground: *foreground, logFile: *logFile, pidFile: *pidFile, daemonReady: *daemonReady,
+	}
+	if *statusMode && *stopMode {
+		fmt.Fprintln(os.Stderr, "rtctl-agent: -status 与 -stop 不能同时使用")
+		return 2
+	}
+	if *logsMode && (*initMode || *statusMode || *stopMode) {
+		fmt.Fprintln(os.Stderr, "rtctl-agent: -logs 不能与 -init/-status/-stop 同时使用")
+		return 2
+	}
+	logsOnlyUsed := false
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "follow", "lines", "no-color":
+			logsOnlyUsed = true
+		}
+	})
+	if !*logsMode && logsOnlyUsed {
+		fmt.Fprintln(os.Stderr, "rtctl-agent: -follow/-lines/-no-color 仅与 -logs 一起使用")
+		return 2
+	}
+	if *logLines <= 0 {
+		fmt.Fprintln(os.Stderr, "rtctl-agent: -lines 必须大于 0")
+		return 2
+	}
+	if *statusMode {
+		if rec, running := runningPIDRecord(opts.pidFile); running {
+			fmt.Printf("rtctl-agent 运行中 (pid=%d)\n  日志文件 : %s\n", rec.PID, opts.logFile)
+			fmt.Printf("  查看日志 : %s -logs -follow -log-file %s\n", strconv.Quote(os.Args[0]), strconv.Quote(opts.logFile))
+			return 0
+		}
+		fmt.Printf("rtctl-agent 未运行\n  PID 文件 : %s\n", opts.pidFile)
+		if hint := portOccupiedHint(statusListenAddr(opts)); hint != "" {
+			fmt.Printf("  注意: %s\n", hint)
+		}
+		return 1
+	}
+	if *stopMode {
+		pid, err := stopPIDFile(opts.pidFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "rtctl-agent: %v\n", err)
+			return 1
+		}
+		if pid == 0 {
+			fmt.Println("rtctl-agent 未运行")
+		} else {
+			fmt.Printf("rtctl-agent 已停止 (pid=%d)\n", pid)
+		}
+		return 0
+	}
+
+	// -logs 只读日志文件：不读配置、不校验 token、不启动服务、不写 PID。
+	if *logsMode {
+		console.DisableQuickEdit()
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := showLogs(ctx, *logFile, *logLines, *followLogs, wantColor(*noColor), os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "rtctl-agent: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	c, err := loadRuntimeConfig(opts)
+	if err != nil {
+		return reportRuntimeError(opts, err)
+	}
+	if opts.daemonReady != "" {
+		ignoreTerminalHangup()
+	}
+
+	fwSum, fwDetail := "", ""
+	if opts.daemonReady == "" && opts.openFirewall {
+		fr, _ := openFirewallPort(c.listen)
+		fwSum, fwDetail = fr.summary, fr.detail
+	}
+	if fwDetail != "" {
+		fmt.Println(fwDetail)
+	}
+	if opts.daemonReady == "" && opts.foreground {
+		printStartup(c, opts.configPath, fwSum, opts.printToken)
+		fmt.Printf("  日志文件 : %s\n", opts.logFile)
+		fmt.Printf("  查看日志 : %s -logs -follow -log-file %s\n", strconv.Quote(os.Args[0]), strconv.Quote(opts.logFile))
+	}
+	if opts.daemonReady == "" && !opts.foreground {
+		result, err := launchBackground(opts.pidFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "rtctl-agent: %v\n", err)
+			return 1
+		}
+		printStartup(c, opts.configPath, fwSum, opts.printToken)
+		fmt.Printf("  后台 PID  : %d\n", result.PID)
+		if result.Addr != "" {
+			fmt.Printf("  实际监听 : %s\n", result.Addr)
+		}
+		fmt.Printf("  日志文件 : %s（每个约 10MB，保留 3 个备份）\n", opts.logFile)
+		fmt.Printf("  查看日志 : %s -logs -follow -log-file %s\n", strconv.Quote(os.Args[0]), strconv.Quote(opts.logFile))
+		fmt.Printf("  查看状态 : %s -status -pid-file %s\n", strconv.Quote(os.Args[0]), strconv.Quote(opts.pidFile))
+		fmt.Printf("  停止服务 : %s -stop -pid-file %s\n", strconv.Quote(os.Args[0]), strconv.Quote(opts.pidFile))
+		return 0
+	}
+
+	if err := runAgent(opts, c); err != nil {
+		return reportRuntimeError(opts, err)
+	}
+	return 0
+}
+
+func loadRuntimeConfig(o runtimeOptions) (cfg, error) {
 	c := cfg{listen: ":8443"}
-	if loaded, err := loadConfig(*configPath); err == nil {
+	if loaded, err := loadConfig(o.configPath); err == nil {
 		c = loaded
 		if c.listen == "" {
 			c.listen = ":8443"
 		}
 	} else if !os.IsNotExist(err) {
-		log.Fatalf("读取配置失败 %s: %v", *configPath, err)
+		return c, fmt.Errorf("读取配置失败 %s: %w", o.configPath, err)
 	}
-
-	if *listen != "" {
-		c.listen = *listen
+	if o.listen != "" {
+		c.listen = o.listen
 	}
-	if *id != "" {
-		c.id = *id
+	if o.id != "" {
+		c.id = o.id
 	} else if c.id == "" {
 		c.id = os.Getenv("RTCTL_ID")
 	}
-	if *token != "" {
-		c.token = *token
+	if o.token != "" {
+		c.token = o.token
 	} else if c.token == "" {
 		c.token = os.Getenv("RTCTL_TOKEN")
 	}
-	if *tlsCert != "" {
-		c.tlsCert = *tlsCert
+	if o.tlsCert != "" {
+		c.tlsCert = o.tlsCert
 	}
-	if *tlsKey != "" {
-		c.tlsKey = *tlsKey
+	if o.tlsKey != "" {
+		c.tlsKey = o.tlsKey
 	}
-	if *allowSudo {
+	if o.allowSudo {
 		c.allowSudo = true
 	}
-	if *wsPath != "" {
-		c.wsPath = *wsPath
+	if o.wsPath != "" {
+		c.wsPath = o.wsPath
 	}
-
 	if c.id == "" || c.token == "" {
-		log.Fatalf("缺少设备 ID/token：编辑 %s 或运行 %s -init 自动生成（也可 -id/-token 或环境变量 RTCTL_ID/RTCTL_TOKEN）", *configPath, os.Args[0])
+		return c, fmt.Errorf("缺少设备 ID/token：编辑 %s 或运行 %s -init 自动生成（也可 -id/-token 或环境变量 RTCTL_ID/RTCTL_TOKEN）", o.configPath, os.Args[0])
 	}
 	if (c.tlsCert == "") != (c.tlsKey == "") {
-		log.Fatal("-tls-cert 与 -tls-key 必须同时提供（或同时留空）")
+		return c, fmt.Errorf("-tls-cert 与 -tls-key 必须同时提供（或同时留空）")
+	}
+	return c, nil
+}
+
+func runAgent(o runtimeOptions, c cfg) error {
+	logWriter, err := openRotatingLog(o.logFile, defaultLogMaxBytes, defaultLogBackups)
+	if err != nil {
+		return err
+	}
+	defer logWriter.Close()
+	log.SetOutput(logWriter)
+
+	rec, err := writePIDFile(o.pidFile)
+	if err != nil {
+		return err
+	}
+	defer removeOwnPIDFile(o.pidFile)
+
+	listener, err := net.Listen("tcp", c.listen)
+	if err != nil {
+		if isAddrInUse(err) {
+			return fmt.Errorf("监听 %s 失败: 端口已被占用（排查: %s -status -pid-file %s；若非本 agent 实例占用，请用 -listen :<端口> 更换监听地址）",
+				c.listen, strconv.Quote(os.Args[0]), strconv.Quote(o.pidFile))
+		}
+		return fmt.Errorf("监听 %s 失败: %w", c.listen, err)
+	}
+	defer listener.Close()
+	if c.tlsCert != "" {
+		if _, err := tls.LoadX509KeyPair(c.tlsCert, c.tlsKey); err != nil {
+			return fmt.Errorf("加载 TLS 证书失败: %w", err)
+		}
 	}
 
 	a := agent.New(c.id, c.token)
 	a.AllowSudo = c.allowSudo
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	log.Printf("rtctl-agent 启动: pid=%d id=%s listen=%s tls=%v allow-sudo=%v（配置: %s）",
+		rec.PID, c.id, c.listen, c.tlsCert != "", c.allowSudo, o.configPath)
+	if err := notifyDaemon(o.daemonReady, daemonResult{PID: rec.PID, Addr: listener.Addr().String()}); err != nil {
+		return err
+	}
+	if err := a.ServeStandaloneOn(ctx, listener, c.tlsCert, c.tlsKey, c.wsPath); err != nil {
+		return fmt.Errorf("agent 服务退出: %w", err)
+	}
+	log.Printf("rtctl-agent 已停止: pid=%d", rec.PID)
+	return nil
+}
 
-	// 启动信息：一条 stderr 日志（供日志采集，不含 token）+ stdout 格式化块（含 token 与本机地址）
-	log.Printf("rtctl-agent 启动: id=%s listen=%s tls=%v allow-sudo=%v（配置: %s）",
-		c.id, c.listen, c.tlsCert != "", c.allowSudo, *configPath)
-
-	// 防火墙：自动放行监听端口（best-effort，失败仅提示，不阻塞启动）
-	fwSum, fwDetail := "", ""
-	if *openFirewall {
-		fr, _ := openFirewallPort(c.listen) // 失败也返回提示文案，一并展示
-		fwSum, fwDetail = fr.summary, fr.detail
+func reportRuntimeError(o runtimeOptions, err error) int {
+	if o.daemonReady != "" {
+		notifyDaemon(o.daemonReady, daemonResult{Error: err.Error()})
+		log.Printf("rtctl-agent 启动失败: %v", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "rtctl-agent: %v\n", err)
 	}
-	if fwDetail != "" {
-		fmt.Println(fwDetail)
-	}
-	printStartup(c, *configPath, fwSum, *printToken)
-	if err := a.ServeStandalone(ctx, c.listen, c.tlsCert, c.tlsKey, c.wsPath); err != nil {
-		log.Fatalf("agent 退出: %v", err)
-	}
+	return 1
 }
 
 func tlsNote(cert string) string {

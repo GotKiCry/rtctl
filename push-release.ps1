@@ -1,5 +1,5 @@
 # push-release.ps1 —— 一键推送代码 + 创建 GitHub Release（附件含二进制、install.sh、SHA256SUMS）
-# 用法：pwsh ./push-release.ps1 -Version v3.3.0
+# 用法：pwsh ./push-release.ps1 -Version v1.0.0
 # 需要：git 已配置凭据（或弹窗登录），或已装 gh CLI（gh auth login 过）。
 param([string]$Version = '')
 $ErrorActionPreference = 'Stop'
@@ -8,7 +8,7 @@ Set-Location $PSScriptRoot
 if (-not $Version) {
   $Version = (git describe --tags --exact-match 2>$null)
   if (-not $Version) {
-    throw '未指定版本且当前提交无 tag：请用 pwsh ./push-release.ps1 -Version v3.3.0'
+    throw '未指定版本且当前提交无 tag：请用 pwsh ./push-release.ps1 -Version v1.0.0'
   }
   $Version = $Version.Trim()
 }

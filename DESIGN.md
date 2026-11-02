@@ -105,6 +105,8 @@
 - Windows 输出的中文编码自动判断（UTF-8 直接用，否则按 GBK 转）。
 - 每条消息处理完，把结果回给**发来请求的那条连接**。
 - 客户端断开时，把所有它发起的命令、终端、上传全部清理掉，不留孤儿进程。
+- 直接运行时默认脱离终端进入后台；父进程等子进程绑定监听成功后再返回，启动失败会带回错误（端口占用时附排查提示）。`-foreground` 禁止自后台化，供 systemd/OpenRC/nohup 等外部托管。`-status` 在 PID 文件无记录但监听端口被占时会提示存在未受管实例。
+- 运行日志由 agent 自己写入文件（0600），每个文件约 10MB，保留 3 个轮转备份；PID 文件记录进程身份，用于 `-status` 与 `-stop`。`-logs` 在本机直接查看日志：文件保持纯文本，查看时按来源/结果着色并脱敏（token/私钥不原样显示）。
 
 ### 4.2 客户端（`cmd/client`）
 
@@ -173,6 +175,12 @@
 | agent | `-tls-cert` / `-tls-key` | 空 | 两个都填 = 开加密（WSS） |
 | agent | `-allow-sudo` | false | 允许 root 特权命令 |
 | agent | `-open-firewall` | true | 启动时自动放行监听端口（best-effort：root/管理员直接执行，否则尝试免密 sudo；失败只提示不阻塞） |
+| agent | `-foreground` | false | 前台运行；默认直接启动会后台化，服务管理器托管时必须传此参数 |
+| agent | `-status` / `-stop` | — | 查询/停止 PID 文件对应的本机实例 |
+| agent | `-logs` | — | 查看运行日志后退出（自带脱敏与终端着色；只读日志，不启动服务） |
+| agent | `-follow` / `-lines` / `-no-color` | 100 行 | 仅配 `-logs`：跟随输出 / 显示行数 / 关颜色（`NO_COLOR` 环境变量同样生效） |
+| agent | `-log-file` | `~/.rtctl/agent.log` | 自管理运行日志（0600，约 10MB 轮转，保留 3 个备份） |
+| agent | `-pid-file` | `~/.rtctl/agent.pid` | PID 与可执行文件身份记录 |
 | rtctl | `-server` | ws://127.0.0.1:8443/ws | 设备地址 |
 | rtctl | `-client-id` | 空 | 记录操作者身份（日志用） |
 | rtctl | `-json` | false | 输出 JSON |
@@ -186,9 +194,13 @@
 ```
 rtctl/
 ├── go.mod
-├── build.ps1                # 一键构建 4 个平台产物 + 校验文件
+├── build.ps1                # 一键构建 Windows/Linux 产物 + 校验文件
 ├── cmd/
-│   ├── agent/main.go        # 被控端入口（配置/初始化/启动）
+│   ├── agent/               # 被控端入口、日志轮转、后台进程与 PID 管理
+│   │   ├── main.go          # 配置/初始化/启动与管理命令
+│   │   ├── daemon_*.go      # Linux/Windows 后台化与进程管理
+│   │   ├── logging.go       # 自管理日志写入与轮转
+│   │   └── logview*.go      # 内置日志查看（-logs，按来源/结果着色）
 │   └── client/              # 本机命令行
 │       ├── main.go          # 入口、命令分发、快捷入口、list/exec/shell
 │       ├── file.go          # 文件上传/下载

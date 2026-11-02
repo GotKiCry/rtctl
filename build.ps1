@@ -1,5 +1,5 @@
 # build.ps1 —— 构建 rtctl / rtctl-agent（Windows + Linux 静态二进制）+ install.sh + SHA256SUMS
-# 运行：pwsh ./build.ps1 [-Version v3.3.0]（需 Go 1.25+；版本缺省取 git describe）
+# 运行：pwsh ./build.ps1 [-Version v1.0.0]（需 Go 1.25+；版本缺省取 git describe）
 param([string]$Version = '')
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot

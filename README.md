@@ -3,7 +3,7 @@
 > ⚠️ **安全警告（请先读）**
 > - **token 就是钥匙**：谁拿到 token 谁就能控制这台服务器，别发群里、别写进代码仓库、别截图乱传。
 > - **默认是明文连接**：不配置证书时，命令和 token 都在网络上明文传输。公网/共享网络**务必**启用 TLS（见「TLS 与反向代理」）。
-> - **启动日志可能打印 token**：安装脚本已默认关闭该行为（`-print-token=false`），但手工启动 agent 时注意日志可见范围。
+> - **启动信息可能打印 token**：安装脚本已默认关闭该行为（`-print-token=false`），但手工启动 agent 时注意终端与日志采集的可见范围。
 > - **agent 以普通用户 `rtctl` 运行**（别用 root）；本工具等于远程 Shell，**只装在你可信的机器上**。
 
 一句话：两个小工具。**agent 放在目标服务器上**，**rtctl 在你本机**，输一行命令就能远程执行 Shell 并拿回结果：
@@ -38,6 +38,8 @@ curl -fsSL https://github.com/GotKiCry/rtctl/releases/latest/download/install.sh
 > curl -fsSL https://github.com/GotKiCry/rtctl/releases/latest/download/install.sh -o /tmp/rt-install.sh \
 >   && sh /tmp/rt-install.sh --scope user
 > ```
+>
+> 防火墙仅在 root 或免密 `sudo` 可用时自动放行；其他环境不修改防火墙，只检查端口是否可连通。
 
 ### 安装后常用命令（管理脚本名就是 `rt`）
 
@@ -63,10 +65,10 @@ sudo rt help                   # 全部命令
 
 ```bash
 ./rtctl-agent -init        # 第一次运行：生成 agent.conf + 随机 token
-./rtctl-agent             # 之后直接启动，启动时会打印连接信息
+./rtctl-agent              # 默认后台启动；确认监听成功后才返回
 ```
 
-启动后你会看到类似：
+启动后终端只打印一次连接信息和管理提示，不会持续输出日志：
 
 ```text
 rtctl-agent 启动 ✔  (id=web-01)
@@ -75,9 +77,14 @@ rtctl-agent 启动 ✔  (id=web-01)
   防火墙   : 已放行 41234/tcp（ufw）
   设备 token: <已隐藏>（查看: rt token show）
   允许提权 : false
-  配置文件 : /etc/rtctl/agent.conf
+  配置文件 : /home/user/.rtctl/agent.conf
   连接示例 :
     rtctl 192.168.1.5:41234 <token> 'uptime'   # 从控制机执行
+  后台 PID  : 1234
+  日志文件 : /home/user/.rtctl/agent.log（每个约 10MB，保留 3 个备份）
+  查看日志 : ./rtctl-agent -logs -follow -log-file "/home/user/.rtctl/agent.log"
+  查看状态 : ./rtctl-agent -status -pid-file "/home/user/.rtctl/agent.pid"
+  停止服务 : ./rtctl-agent -stop -pid-file "/home/user/.rtctl/agent.pid"
 ```
 
 **你自己电脑上**（把 IP、端口、token 换成上面的）：
@@ -89,6 +96,31 @@ rtctl-agent 启动 ✔  (id=web-01)
 ```
 
 结果包含**命令输出 + 退出码**；命令失败（如退出码 42），rtctl 也返回 42，方便脚本判断。
+
+### 后台运行与日志
+
+```bash
+./rtctl-agent -status           # 查看本机 agent 是否运行
+./rtctl-agent -stop             # 停止后台 agent；关闭终端不会停止它
+./rtctl-agent -foreground       # 前台运行，供调试或服务管理器托管
+./rtctl-agent -logs             # 查看最近 100 行日志（自带着色，Windows/Linux 通用）
+./rtctl-agent -logs -follow     # 实时跟随日志（Ctrl+C 退出；轮转后自动跟上新文件）
+./rtctl-agent -logs -lines 500  # 多看几行
+```
+
+Windows 上是同一条命令（PowerShell / CMD 均可）：
+
+```powershell
+.\rtctl-agent.exe -logs
+.\rtctl-agent.exe -logs -follow
+```
+
+- `-logs` 直接读取本机日志文件，无需 journalctl/tail，终端里按事件着色：绿=启动/成功（exit=0）、红=失败/非零退出/超时、黄=命令开始（exec）、品红=文件传输（file_put/file_get）、蓝=shell 会话、青=client 接入/断开、暗色=时间戳。输出经管道/重定向时自动纯文本；`-no-color` 或 `NO_COLOR` 环境变量可强制关闭。
+- 查看时会自动脱敏（token / 私钥不会原样显示）。日志文件本身始终是纯文本（0600），也可以用 `tail -F ~/.rtctl/agent.log` 直接看。
+- 默认日志为 `~/.rtctl/agent.log`，PID 文件为 `~/.rtctl/agent.pid`；可用 `-log-file`、`-pid-file` 修改。修改 PID 路径后，`-status`、`-stop` 也要传相同路径。
+- 每个日志文件约 10MB，自动保留 `.1` 到 `.3` 三个轮转备份。前台模式的运行日志也写入文件，不会持续刷终端。
+- 端口占用、配置或 TLS 错误会让启动命令直接失败，不会假报后台启动成功；端口被占时启动报错会附排查提示，`-status` 在「未运行但端口被占」时也会提醒存在未受 PID 文件管理的旧实例或其他程序。
+- 通过安装脚本部署的机器继续使用 `rt status`、`rt logs -f`、`rt stop`（新版 agent 上 `rt logs` 自动走内置查看器）；服务由 systemd/OpenRC/nohup 托管，不要再手工启动第二个实例。
 
 ---
 

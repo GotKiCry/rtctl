@@ -33,7 +33,7 @@ export PATH
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
-RT_VERSION='v3.3.0'
+RT_VERSION='@@RTCTL_VERSION@@'
 RT_SCHEMA=1
 RT_NAME='rt'
 RT_AGENT_NAME='rtctl-agent'
@@ -418,6 +418,8 @@ state_write() {
         printf 'VERSION_FLAG_SUPPORTED=%s\n' "${RT_CAP_VERSION:-false}"
         printf 'WS_PATH_FLAG_SUPPORTED=%s\n' "${RT_CAP_WS_PATH:-false}"
         printf 'OPEN_FIREWALL_FLAG_SUPPORTED=%s\n' "${RT_CAP_OPEN_FIREWALL:-false}"
+        printf 'FOREGROUND_FLAG_SUPPORTED=%s\n' "${RT_CAP_FOREGROUND:-false}"
+        printf 'LOGS_FLAG_SUPPORTED=%s\n' "${RT_CAP_LOGS:-false}"
         printf 'LOG_SOURCE=%s\n' "${RT_LOG_SOURCE:-}"
         printf 'LOG_FILE=%s\n' "${RT_SVC_LOG:-}"
         printf 'PID_FILE=%s\n' "${RT_PID_FILE:-}"
@@ -476,6 +478,8 @@ load_state() {
     RT_CAP_VERSION=$(state_get VERSION_FLAG_SUPPORTED)
     RT_CAP_WS_PATH=$(state_get WS_PATH_FLAG_SUPPORTED)
     RT_CAP_OPEN_FIREWALL=$(state_get OPEN_FIREWALL_FLAG_SUPPORTED)
+    RT_CAP_FOREGROUND=$(state_get FOREGROUND_FLAG_SUPPORTED)
+    RT_CAP_LOGS=$(state_get LOGS_FLAG_SUPPORTED)
     RT_LOG_SOURCE=$(state_get LOG_SOURCE)
     RT_SVC_LOG=$(state_get LOG_FILE)
     RT_PID_FILE=$(state_get PID_FILE)
@@ -662,10 +666,14 @@ probe_agent_caps() {
     RT_CAP_VERSION=false
     RT_CAP_WS_PATH=false
     RT_CAP_OPEN_FIREWALL=false
+    RT_CAP_FOREGROUND=false
+    RT_CAP_LOGS=false
     if agent_cap "$_rt_pac_bin" '-print-token'; then RT_CAP_PRINT_TOKEN=true; fi
     if agent_cap "$_rt_pac_bin" '-version'; then RT_CAP_VERSION=true; fi
     if agent_cap "$_rt_pac_bin" '-ws-path'; then RT_CAP_WS_PATH=true; fi
     if agent_cap "$_rt_pac_bin" '-open-firewall'; then RT_CAP_OPEN_FIREWALL=true; fi
+    if agent_cap "$_rt_pac_bin" '-foreground'; then RT_CAP_FOREGROUND=true; fi
+    if agent_cap "$_rt_pac_bin" '-logs'; then RT_CAP_LOGS=true; fi
 }
 
 agent_version_of() {
@@ -1140,6 +1148,9 @@ render_unit() {
     if [ "$RT_CAP_OPEN_FIREWALL" = true ]; then
         _rt_ru_extra="$_rt_ru_extra -open-firewall=false"
     fi
+    if [ "$RT_CAP_FOREGROUND" = true ]; then
+        _rt_ru_extra="$_rt_ru_extra -foreground -log-file $RT_SVC_LOG"
+    fi
     if [ -n "$_rt_ru_ws" ] && [ "$_rt_ru_ws" != '/ws' ] && [ "$RT_CAP_WS_PATH" = true ]; then
         _rt_ru_extra="$_rt_ru_extra -ws-path $_rt_ru_ws"
     fi
@@ -1217,6 +1228,7 @@ render_openrc() {
     _rt_ro_extra=''
     if [ "$RT_CAP_PRINT_TOKEN" = true ]; then _rt_ro_extra="$_rt_ro_extra -print-token=false"; fi
     if [ "$RT_CAP_OPEN_FIREWALL" = true ]; then _rt_ro_extra="$_rt_ro_extra -open-firewall=false"; fi
+    if [ "$RT_CAP_FOREGROUND" = true ]; then _rt_ro_extra="$_rt_ro_extra -foreground -log-file $RT_SVC_LOG"; fi
     if [ -n "$RT_WS_PATH_STATE" ] && [ "$RT_WS_PATH_STATE" != '/ws' ] && [ "$RT_CAP_WS_PATH" = true ]; then
         _rt_ro_extra="$_rt_ro_extra -ws-path $RT_WS_PATH_STATE"
     fi
@@ -1258,6 +1270,7 @@ install_service_unit() {
     RT_LOG_SOURCE='journald'
     if [ "$RT_INIT" = openrc ]; then RT_LOG_SOURCE=$RT_SVC_LOG; fi
     if [ "$RT_INIT" = nohup ]; then RT_LOG_SOURCE=$RT_SVC_LOG; fi
+    if [ "$RT_CAP_FOREGROUND" = true ]; then RT_LOG_SOURCE=$RT_SVC_LOG; fi
 }
 
 svc_daemon_reload() {
@@ -1349,6 +1362,7 @@ svc_nohup_start() {
     _rt_ns_extra=''
     if [ "$RT_CAP_PRINT_TOKEN" = true ]; then _rt_ns_extra="$_rt_ns_extra -print-token=false"; fi
     if [ "$RT_CAP_OPEN_FIREWALL" = true ]; then _rt_ns_extra="$_rt_ns_extra -open-firewall=false"; fi
+    if [ "$RT_CAP_FOREGROUND" = true ]; then _rt_ns_extra="$_rt_ns_extra -foreground -log-file $RT_SVC_LOG"; fi
     if [ -n "$RT_WS_PATH_STATE" ] && [ "$RT_WS_PATH_STATE" != '/ws' ] && [ "$RT_CAP_WS_PATH" = true ]; then
         _rt_ns_extra="$_rt_ns_extra -ws-path $RT_WS_PATH_STATE"
     fi
@@ -1480,24 +1494,30 @@ svc_remove_unit() {
 
 svc_logs() {
     _rt_sl_follow=${1:-0}
-    case "$RT_INIT" in
-        systemd)
-            if ! have journalctl; then die "$EX_FAIL" "缺少 journalctl，无法读取 journald 日志"; fi
-            if [ "$_rt_sl_follow" = 1 ]; then
-                journalctl -u "$RT_SVC_NAME" -n 200 -f
-            else
-                journalctl -u "$RT_SVC_NAME" -n 200 --no-pager
-            fi
-            ;;
-        *)
-            if [ ! -f "$RT_SVC_LOG" ]; then die "$EX_CONFLICT" "日志文件不存在：$RT_SVC_LOG"; fi
-            if [ "$_rt_sl_follow" = 1 ]; then
-                tail -n 200 -f "$RT_SVC_LOG"
-            else
-                tail -n 200 "$RT_SVC_LOG"
-            fi
-            ;;
-    esac
+    # 新版 agent 内置日志查看器（自带脱敏与终端着色）：日志来源是文件时优先使用
+    if [ "${RT_CAP_LOGS:-false}" = true ] && [ "$RT_LOG_SOURCE" = "$RT_SVC_LOG" ]; then
+        set -- -logs -log-file "$RT_SVC_LOG" -lines 200
+        if [ "$_rt_sl_follow" = 1 ]; then
+            set -- "$@" -follow
+        fi
+        "$RT_BIN_AGENT" "$@"
+        return $?
+    fi
+    if [ "$RT_INIT" = systemd ] && [ "${RT_CAP_FOREGROUND:-false}" != true ]; then
+        if ! have journalctl; then die "$EX_FAIL" "缺少 journalctl，无法读取 journald 日志"; fi
+        if [ "$_rt_sl_follow" = 1 ]; then
+            journalctl -u "$RT_SVC_NAME" -n 200 -f
+        else
+            journalctl -u "$RT_SVC_NAME" -n 200 --no-pager
+        fi
+        return 0
+    fi
+    if [ ! -f "$RT_SVC_LOG" ]; then die "$EX_CONFLICT" "日志文件不存在：$RT_SVC_LOG"; fi
+    if [ "$_rt_sl_follow" = 1 ]; then
+        tail -n 200 -F "$RT_SVC_LOG"
+    else
+        tail -n 200 "$RT_SVC_LOG"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1519,43 +1539,70 @@ fw_detect() {
     printf 'none'
 }
 
+fw_can_modify() {
+    if [ "$RT_EUID" = 0 ]; then
+        return 0
+    fi
+    if ! have sudo || ! sudo -n true >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}
+
+# 防火墙只使用 root 或免密 sudo，避免远程执行时在继承的 /dev/tty 上隐藏等待密码。
+fw_priv() {
+    if [ "$RT_EUID" = 0 ]; then
+        "$@"
+        return $?
+    fi
+    if ! fw_can_modify; then
+        return 126
+    fi
+    sudo -n -- "$@"
+}
+
 fw_apply() {
     _rt_fa_port=$1
-    _rt_fa_backend=$(fw_detect)
-    RT_FW_BACKEND=$_rt_fa_backend
     RT_FW_APPLIED=false
     RT_FW_RULE=''
     RT_FW_UNDO=''
+    if ! fw_can_modify; then
+        RT_FW_BACKEND='none'
+        hint "无 root/可用 sudo，跳过防火墙修改，仅检查 $_rt_fa_port/tcp 是否可连通"
+        return 0
+    fi
+    _rt_fa_backend=$(fw_detect)
+    RT_FW_BACKEND=$_rt_fa_backend
     case "$_rt_fa_backend" in
         ufw)
-            if priv ufw allow "$_rt_fa_port/tcp" comment 'rtctl' >/dev/null 2>&1 \
-                || priv ufw allow "$_rt_fa_port/tcp" >/dev/null 2>&1; then
+            if fw_priv ufw allow "$_rt_fa_port/tcp" comment 'rtctl' >/dev/null 2>&1 \
+                || fw_priv ufw allow "$_rt_fa_port/tcp" >/dev/null 2>&1; then
                 RT_FW_APPLIED=true
                 RT_FW_RULE="allow $_rt_fa_port/tcp"
                 RT_FW_UNDO="ufw delete allow $_rt_fa_port/tcp"
                 ok "防火墙已放行 $_rt_fa_port/tcp（ufw）"
             else
-                warn "ufw 放行失败，请手工执行：sudo ufw allow $_rt_fa_port/tcp"
+                warn "ufw 放行失败（需要 root；非交互安装仅尝试免密 sudo），请手工执行：sudo ufw allow $_rt_fa_port/tcp"
             fi
             ;;
         firewalld)
-            if priv firewall-cmd --permanent --add-port="$_rt_fa_port/tcp" >/dev/null 2>&1 \
-                && priv firewall-cmd --reload >/dev/null 2>&1; then
+            if fw_priv firewall-cmd --permanent --add-port="$_rt_fa_port/tcp" >/dev/null 2>&1 \
+                && fw_priv firewall-cmd --reload >/dev/null 2>&1; then
                 RT_FW_APPLIED=true
                 RT_FW_RULE="port=$_rt_fa_port/tcp"
                 RT_FW_UNDO="firewall-cmd --permanent --remove-port=$_rt_fa_port/tcp && firewall-cmd --reload"
                 ok "防火墙已放行 $_rt_fa_port/tcp（firewalld）"
             else
-                warn "firewalld 放行失败，请手工执行：sudo firewall-cmd --permanent --add-port=$_rt_fa_port/tcp && sudo firewall-cmd --reload"
+                warn "firewalld 放行失败（需要 root；非交互安装仅尝试免密 sudo），请手工执行：sudo firewall-cmd --permanent --add-port=$_rt_fa_port/tcp && sudo firewall-cmd --reload"
             fi
             ;;
         iptables)
             _rt_fa_ok=0
-            if priv iptables -I INPUT -p tcp --dport "$_rt_fa_port" -m comment --comment rtctl -j ACCEPT >/dev/null 2>&1; then
+            if fw_priv iptables -I INPUT -p tcp --dport "$_rt_fa_port" -m comment --comment rtctl -j ACCEPT >/dev/null 2>&1; then
                 _rt_fa_ok=1
             fi
             if have ip6tables; then
-                priv ip6tables -I INPUT -p tcp --dport "$_rt_fa_port" -m comment --comment rtctl -j ACCEPT >/dev/null 2>&1 || true
+                fw_priv ip6tables -I INPUT -p tcp --dport "$_rt_fa_port" -m comment --comment rtctl -j ACCEPT >/dev/null 2>&1 || true
             fi
             if [ "$_rt_fa_ok" = 1 ]; then
                 RT_FW_APPLIED=true
@@ -1564,7 +1611,7 @@ fw_apply() {
                 ok "防火墙已放行 $_rt_fa_port/tcp（iptables）"
                 warn "iptables 规则重启后不保留：请执行 netfilter-persistent save 或改用 ufw/firewalld"
             else
-                warn "iptables 放行失败，请手工执行：sudo iptables -I INPUT -p tcp --dport $_rt_fa_port -j ACCEPT"
+                warn "iptables 放行失败（需要 root；非交互安装仅尝试免密 sudo），请手工执行：sudo iptables -I INPUT -p tcp --dport $_rt_fa_port -j ACCEPT"
             fi
             ;;
         *)
@@ -1588,15 +1635,15 @@ fw_revoke() {
     fi
     case "$_rt_fr_backend" in
         ufw)
-            if priv ufw --force delete allow "$_rt_fr_port/tcp" >/dev/null 2>&1; then
+            if fw_priv ufw --force delete allow "$_rt_fr_port/tcp" >/dev/null 2>&1; then
                 ok "已撤销 ufw 规则：allow $_rt_fr_port/tcp"
             else
                 warn "ufw 规则撤销失败，请手工执行：sudo ufw delete allow $_rt_fr_port/tcp"
             fi
             ;;
         firewalld)
-            if priv firewall-cmd --permanent --remove-port="$_rt_fr_port/tcp" >/dev/null 2>&1 \
-                && priv firewall-cmd --reload >/dev/null 2>&1; then
+            if fw_priv firewall-cmd --permanent --remove-port="$_rt_fr_port/tcp" >/dev/null 2>&1 \
+                && fw_priv firewall-cmd --reload >/dev/null 2>&1; then
                 ok "已撤销 firewalld 端口：$_rt_fr_port/tcp"
             else
                 warn "firewalld 撤销失败，请手工执行：sudo firewall-cmd --permanent --remove-port=$_rt_fr_port/tcp && sudo firewall-cmd --reload"
@@ -1605,14 +1652,14 @@ fw_revoke() {
         iptables)
             _rt_fr_i=0
             while [ "$_rt_fr_i" -lt 5 ]; do
-                if priv iptables -D INPUT -p tcp --dport "$_rt_fr_port" -m comment --comment rtctl -j ACCEPT >/dev/null 2>&1; then
+                if fw_priv iptables -D INPUT -p tcp --dport "$_rt_fr_port" -m comment --comment rtctl -j ACCEPT >/dev/null 2>&1; then
                     _rt_fr_i=$((_rt_fr_i + 1))
                 else
                     break
                 fi
             done
             if have ip6tables; then
-                priv ip6tables -D INPUT -p tcp --dport "$_rt_fr_port" -m comment --comment rtctl -j ACCEPT >/dev/null 2>&1 || true
+                fw_priv ip6tables -D INPUT -p tcp --dport "$_rt_fr_port" -m comment --comment rtctl -j ACCEPT >/dev/null 2>&1 || true
             fi
             ok "已撤销 iptables 规则（带 comment rtctl 的才删）"
             ;;
@@ -2123,7 +2170,12 @@ cmd_status() {
 
 cmd_logs() {
     state_require
-    svc_logs "${RT_FOLLOW:-0}" | sanitize_text
+    # 内置查看器自己脱敏：再走管道会把 stdout 变成非终端，颜色自动失效
+    if [ "${RT_CAP_LOGS:-false}" = true ] && [ "$RT_LOG_SOURCE" = "$RT_SVC_LOG" ]; then
+        svc_logs "${RT_FOLLOW:-0}"
+    else
+        svc_logs "${RT_FOLLOW:-0}" | sanitize_text
+    fi
 }
 
 cmd_enable() {
@@ -2292,6 +2344,12 @@ cmd_uninstall() {
             if have shred; then priv shred -u "$_rt_un_b" 2>/dev/null || priv rm -f "$_rt_un_b"; else priv rm -f "$_rt_un_b"; fi
         done
         priv rm -rf "$RT_TLS_DIR" 2>/dev/null || true
+        if [ -n "$RT_SVC_LOG" ]; then
+            for _rt_un_log in "$RT_SVC_LOG" "$RT_SVC_LOG".[0-9]*; do
+                [ -e "$_rt_un_log" ] || continue
+                priv rm -f "$_rt_un_log" 2>/dev/null || true
+            done
+        fi
         priv rm -rf "$RT_LOG_DIR" 2>/dev/null || true
         priv rmdir "$RT_CONF_DIR" 2>/dev/null || true
         if [ "$RT_SCOPE" = system ]; then
@@ -3246,6 +3304,8 @@ rt_init_defaults() {
     RT_CAP_VERSION='false'
     RT_CAP_WS_PATH='false'
     RT_CAP_OPEN_FIREWALL='false'
+    RT_CAP_FOREGROUND='false'
+    RT_CAP_LOGS='false'
     RT_LOG_SOURCE=''
     RT_SVC_LOG=''
     RT_PID_FILE=''

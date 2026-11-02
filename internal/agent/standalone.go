@@ -5,7 +5,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -26,10 +28,10 @@ type standaloneConn struct {
 	addr string // 对端 IP:port（来源）
 
 	mu       sync.Mutex
-	clientID string                // auth 时客户端声明的操作者标识（可为空）
-	execs    map[string]struct{}   // 本连接发起的 exec ID
-	shells   map[string]struct{}   // 本连接打开的 shell 会话
-	puts     map[string]struct{}   // 本连接发起的上传
+	clientID string              // auth 时客户端声明的操作者标识（可为空）
+	execs    map[string]struct{} // 本连接发起的 exec ID
+	shells   map[string]struct{} // 本连接打开的 shell 会话
+	puts     map[string]struct{} // 本连接发起的上传
 }
 
 func newStandaloneConn(ws *websocket.Conn, addr string) *standaloneConn {
@@ -85,9 +87,18 @@ type Standalone struct {
 }
 
 // ServeStandalone 启动直连监听（阻塞直到 ctx 取消或服务出错）。
+func (a *Agent) ServeStandalone(ctx context.Context, listen, tlsCert, tlsKey, wsPath string) error {
+	listener, err := net.Listen("tcp", listen)
+	if err != nil {
+		return err
+	}
+	return a.ServeStandaloneOn(ctx, listener, tlsCert, tlsKey, wsPath)
+}
+
+// ServeStandaloneOn 在已绑定的 listener 上提供直连服务。
 // wsPath 为 WebSocket 路径（默认 /ws）；反向代理/路径前缀场景可改，
 // 例如 -ws-path /rt/ws，此时健康检查同时注册在 /rt/healthz。
-func (a *Agent) ServeStandalone(ctx context.Context, listen, tlsCert, tlsKey, wsPath string) error {
+func (a *Agent) ServeStandaloneOn(ctx context.Context, listener net.Listener, tlsCert, tlsKey, wsPath string) error {
 	if wsPath == "" {
 		wsPath = "/ws"
 	}
@@ -105,17 +116,23 @@ func (a *Agent) ServeStandalone(ctx context.Context, listen, tlsCert, tlsKey, ws
 		health = dir + "/healthz"
 		mux.HandleFunc(health, healthHandler)
 	}
-	srv := &http.Server{Addr: listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
+	srv := &http.Server{Addr: listener.Addr().String(), Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	go func() {
 		<-ctx.Done()
 		srv.Close()
 	}()
 	log.Printf("[agent] 直连模式监听 %s（ws 路径 %s，健康检查 %s；无需中继，连接需持有设备 token）",
-		listen, wsPath, health)
+		listener.Addr(), wsPath, health)
+	var err error
 	if tlsCert != "" {
-		return srv.ListenAndServeTLS(tlsCert, tlsKey)
+		err = srv.ServeTLS(listener, tlsCert, tlsKey)
+	} else {
+		err = srv.Serve(listener)
 	}
-	return srv.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 func originOK(r *http.Request) bool {
