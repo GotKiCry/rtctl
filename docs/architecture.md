@@ -1,6 +1,6 @@
-# rtctl — 设计说明（直连版）
+# rtctl 架构与协议
 
-这是给开发者看的内部说明：协议怎么走、错误码有哪些、边界行为怎么定义。通俗版本见 [README.md](README.md)。
+本文面向开发者，说明直连架构、消息协议、错误码和边界行为。安装与使用说明见 [README](../README.md)。
 
 ## 1. 这个东西做什么
 
@@ -9,10 +9,10 @@
 - **rtctl-agent**：放在目标服务器上，自己开一个 WebSocket 服务口，等别人连。
 - **rtctl**：你电脑上的命令行工具，直接连 agent，发一条命令、收结果。
 
-两种用法：
+三种主要用法：
 1. **一次性命令**（`exec`）：发一条 Shell 命令，拿回输出和退出码。
 2. **交互式终端**（`shell`）：像 SSH 那样开一个会话，可以持续敲命令。
-3. 顺手还有**文件上传/下载**（`file-put / file-get`）。
+3. **文件传输**（`file-put` / `file-get`）：上传或下载单个文件。
 
 ## 2. 怎么连
 
@@ -27,7 +27,7 @@
 
 - 没有中间服务器，agent 自己监听，rtctl 直连。
 - 每台设备一把钥匙（token）。**token 就是设备全部权限**，谁有谁操作。
-- 连接后第一步先发 `auth` 打个招呼（带一个可选的 `id`，用于在日志里认出是谁连的）。
+- 客户端连接后发送 `auth`（可带 `id` 标识操作者）；exec、shell 和文件操作会校验 token，`list` 与 `/healthz` 无需 token。
 - agent 默认拒绝浏览器网页发起的跨站连接（防被人挂页面偷偷连）。
 
 ## 3. 消息长什么样
@@ -57,7 +57,7 @@
 
 | 类型 | 谁发给谁 | 说明 |
 |---|---|---|
-| exec | 客户端 → agent | `{cmd, timeout_ms?, workdir?, stdin?, sudo?}` 发起执行 |
+| exec | 客户端 → agent | `{cmd, timeout_ms?, workdir?, stdin?, sudo?, sudo_password?}` 发起执行 |
 | exec_output | agent → 客户端 | 输出分批回传；最后一帧 `done=true` 带退出码；`truncated=true` 表示输出太多了，中间有丢 |
 | exec_kill | 客户端 → agent | `{exec_id}` 停止这个命令 |
 
@@ -141,7 +141,7 @@
 | not_found | 文件不存在 |
 | internal | 内部错误 |
 | sudo_disabled | 想用 root 权限但 agent 没开 `allow_sudo` |
-| sudo_denied | sudo 没放行（服务器上免密规则没配好） |
+| sudo_denied | sudo 密码错误或服务器侧授权失败 |
 | approval_required | 特权命令没被确认（非交互没加 `-confirm-sudo`） |
 
 ### 5.3 root 权限（sudo）怎么把关
@@ -149,10 +149,10 @@
 想用 `-sudo` 执行 root 命令，三层缺一不可：
 
 1. **agent 层**：`allow_sudo = true`（默认关，防手滑）；
-2. **你这一层**：交互时当面 y/N 确认；程序调用必须显式 `-confirm-sudo`；
-3. **服务器层**：给 agent 用户配 sudoers 免密规则（只放行 `/bin/sh`、`/usr/bin/sh`、`/usr/bin/kill`、`/bin/kill` 几个命令）。
+2. **客户端层**：交互时当面 y/N 确认；程序调用必须显式 `-confirm-sudo`；
+3. **服务器层**：永久授权需要 sudoers 免密规则，临时授权需要有效的 root 密码。
 
-只能通过 `sudo -n -- /bin/sh -c <命令>` 提权，agent 本身保持普通用户运行（不是整个 agent 跑 root）。日志里特权命令会标 `(SUDO)`。
+永久授权通过 `sudo -n -- /bin/sh -c <命令>` 执行。临时授权由客户端使用 `-sudo-ask`（或脚本使用 `-sudo-password-stdin`）取得密码，agent 再通过 `sudo -S` 读取；密码只用于本次提权，不写入配置或日志。agent 本身始终保持普通用户运行，日志里特权命令会标 `(SUDO)`。
 
 ### 5.4 超时行为
 
@@ -173,7 +173,9 @@
 | agent | `-listen` | `:8443` | 监听地址 |
 | agent | `-id` / `-token` | — | 设备编号/钥匙（或环境变量 `RTCTL_ID` / `RTCTL_TOKEN`） |
 | agent | `-tls-cert` / `-tls-key` | 空 | 两个都填 = 开加密（WSS） |
+| agent | `-ws-path` | `/ws` | WebSocket 路径，健康检查同步注册在对应前缀下 |
 | agent | `-allow-sudo` | false | 允许 root 特权命令 |
+| agent | `-print-token` | true | 启动信息是否打印完整 token；服务安装时默认关闭 |
 | agent | `-open-firewall` | true | 启动时自动放行监听端口（best-effort：root/管理员直接执行，否则尝试免密 sudo；失败只提示不阻塞） |
 | agent | `-foreground` | false | 前台运行；默认直接启动会后台化，服务管理器托管时必须传此参数 |
 | agent | `-status` / `-stop` | — | 查询/停止 PID 文件对应的本机实例 |
@@ -182,10 +184,12 @@
 | agent | `-log-file` | `~/.rtctl/agent.log` | 自管理运行日志（0600，约 10MB 轮转，保留 3 个备份） |
 | agent | `-pid-file` | `~/.rtctl/agent.pid` | PID 与可执行文件身份记录 |
 | rtctl | `-server` | ws://127.0.0.1:8443/ws | 设备地址 |
+| rtctl | `-cafile` / `-insecure` | 空 / false | 自定义 CA / 跳过证书校验（后者仅限调试） |
 | rtctl | `-client-id` | 空 | 记录操作者身份（日志用） |
 | rtctl | `-json` | false | 输出 JSON |
 | rtctl exec | `-timeout` / `-workdir` / `-stdin-file` / `-c` | — | 执行选项 |
 | rtctl exec | `-sudo` / `-confirm-sudo` | false | 特权命令 + 程序调用确认 |
+| rtctl exec | `-sudo-ask` / `-sudo-password-stdin` | false | 临时提权：交互读取密码 / 从标准输入读取密码 |
 
 取值优先级（agent）：命令行 > 配置文件 > 环境变量。
 
@@ -193,22 +197,18 @@
 
 ```
 rtctl/
-├── go.mod
-├── build.ps1                # 一键构建 Windows/Linux 产物 + 校验文件
 ├── cmd/
-│   ├── agent/               # 被控端入口、日志轮转、后台进程与 PID 管理
-│   │   ├── main.go          # 配置/初始化/启动与管理命令
-│   │   ├── daemon_*.go      # Linux/Windows 后台化与进程管理
-│   │   ├── logging.go       # 自管理日志写入与轮转
-│   │   └── logview*.go      # 内置日志查看（-logs，按来源/结果着色）
-│   └── client/              # 本机命令行
-│       ├── main.go          # 入口、命令分发、快捷入口、list/exec/shell
-│       ├── file.go          # 文件上传/下载
-│       └── winch_*.go       # 窗口大小变化处理（SIGWINCH）
-└── internal/
-    ├── proto/proto.go       # 消息类型和字段定义
-    ├── agent/               # 执行器 + 直连服务端（Linux/Windows 分平台）
-    └── idutil/              # 随机 ID
+│   ├── agent/               # 被控端入口、后台进程、PID 与日志管理
+│   └── client/              # 控制端入口、命令分发和文件传输
+├── internal/
+│   ├── agent/               # 命令执行器与直连服务端
+│   ├── console/             # Windows 控制台兼容处理
+│   ├── idutil/              # 随机 ID
+│   └── proto/               # 消息类型和字段定义
+├── docs/architecture.md     # 本文档
+├── install.sh               # Linux 安装与管理脚本
+├── build.sh / build.ps1     # 跨平台构建
+└── go.mod / go.sum          # Go 模块与依赖锁定
 ```
 
 ## 8. 安全注意
@@ -217,4 +217,4 @@ rtctl/
 2. 跨公网必开 WSS（`tls_cert/tls_key`），否则 token 和命令都是明文。
 3. agent 默认拒绝网页跨站连接；建议用普通用户跑 agent，别用 root。
 4. 这工具 = 远程 Shell：只在可信机器上装。
-5. 特权命令默认全链路拒绝；`allow_sudo` + 免密规则都只能人工配置，工具自己不会开。
+5. 特权命令默认关闭；必须显式启用 `allow_sudo`，并完成客户端确认和服务器侧授权。详见 [安全政策](../SECURITY.md)。

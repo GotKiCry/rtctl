@@ -1,16 +1,22 @@
-# 本地产物
+# 构建与 Release 产物（只通过 GitHub Release 分发）
+bin/
+
+# Go 测试与本地缓存
+*.test
+*.out
+.gocache/
+.gotelemetry/
+
+# 本地运行和测试文件
 audit.log
 *.log
 smoke/
 deploy/*.xml
+.tmp-*
 
-# Go
-*.test
-*.out
-
-# 构建产物（build.ps1 生成；SHA256SUMS.txt 随产物一起，不入库）
-bin/
-
-# Go 本地缓存（受限环境构建时指向工作区内）
-.gocache/
-.gotelemetry/
+# 编辑器与操作系统
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

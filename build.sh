@@ -59,4 +59,4 @@ if grep -q "$(printf '\r')" SHA256SUMS.txt; then
   exit 1
 fi
 printf 'SHA256SUMS.txt written (%s entries, LF)\n' "$(wc -l < SHA256SUMS.txt | tr -d ' ')"
-printf '提示：发布前核对 install.sh 的 sha256 并写进 RELNOTES（README 的 --pinned-sha256 用它）\n'
+printf '提示：发布前核对 install.sh 的 sha256，并更新 CHANGELOG 与 Release 说明\n'

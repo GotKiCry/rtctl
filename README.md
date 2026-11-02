@@ -1,278 +1,236 @@
-# rtctl — 远程终端控制工具（直连版）
+# rtctl
 
-> ⚠️ **安全警告（请先读）**
-> - **token 就是钥匙**：谁拿到 token 谁就能控制这台服务器，别发群里、别写进代码仓库、别截图乱传。
-> - **默认是明文连接**：不配置证书时，命令和 token 都在网络上明文传输。公网/共享网络**务必**启用 TLS（见「TLS 与反向代理」）。
-> - **启动信息可能打印 token**：安装脚本已默认关闭该行为（`-print-token=false`），但手工启动 agent 时注意终端与日志采集的可见范围。
-> - **agent 以普通用户 `rtctl` 运行**（别用 root）；本工具等于远程 Shell，**只装在你可信的机器上**。
+[最新版本](https://github.com/GotKiCry/rtctl/releases/latest) · [变更记录](CHANGELOG.md) · [开发说明](CONTRIBUTING.md) · [安全政策](SECURITY.md) · [MIT 许可证](LICENSE)
 
-一句话：两个小工具。**agent 放在目标服务器上**，**rtctl 在你本机**，输一行命令就能远程执行 Shell 并拿回结果：
+> **安全提示：rtctl 等同于远程 Shell。token 即设备全部权限；公网或共享网络必须启用 TLS。只应在可信设备上安装 agent。**
 
-```bash
-rtctl 192.168.1.5:41234 你的token 'uptime'
-```
+## 功能
 
-不需要中继服务器、不需要中心数据库。就两个二进制，Linux/Windows 都能跑。
+- 远程命令执行，返回完整输出和退出码
+- Linux 交互式终端，以及 Windows 命令会话
+- 文件上传、下载和断连清理
+- 可选 TLS、WebSocket 路径前缀、nginx/Caddy 反向代理
+- Linux 一键安装及 systemd、OpenRC、nohup 服务托管
+- agent 后台启动、PID 管理、日志轮转、日志着色与脱敏
+- 安装脚本升级、健康检查和失败回滚
 
----
+## 支持平台
 
-## 一键安装（Linux 目标服务器）
+| 平台 | 架构 | agent | client |
+|---|---|---|---|
+| Linux | amd64 / arm64 | 支持 | 支持 |
+| Windows | amd64 | 支持 | 支持 |
 
-```bash
-curl -fsSL https://github.com/GotKiCry/rtctl/releases/latest/download/install.sh -o /tmp/rt-install.sh \
-  && sudo sh /tmp/rt-install.sh
-```
+## 快速开始
 
-安装脚本会依次：
+### 1. 在 Linux 目标设备安装 agent
 
-1. 识别系统与架构（amd64 / arm64），校验二进制 SHA256；
-2. 创建专用运行用户 **`rtctl`**（无登录 shell）；
-3. **自动随机挑一个 5 位端口**（10000–65535，检测未被占用、避开常见端口），也可用 `--port 41234` 指定；
-4. 生成设备 token（写入 `/etc/rtctl/agent.conf`，权限 0600）；
-5. 安装并启动 systemd 服务（无 systemd 时自动回退 OpenRC / nohup）；
-6. 放行防火墙端口；
-7. 打印端口、token 与可直接粘贴的连接示例。
-
-> 只想装控制端、或没有 sudo？用用户级安装：
-> ```bash
-> curl -fsSL https://github.com/GotKiCry/rtctl/releases/latest/download/install.sh -o /tmp/rt-install.sh \
->   && sh /tmp/rt-install.sh --scope user
-> ```
->
-> 防火墙仅在 root 或免密 `sudo` 可用时自动放行；其他环境不修改防火墙，只检查端口是否可连通。
-
-### 安装后常用命令（管理脚本名就是 `rt`）
+系统级安装（推荐）：
 
 ```bash
-sudo rt status                 # 服务状态 / 端口 / 配置路径 / 版本
-sudo rt token show --reveal    # 查看 token 与连接示例（默认只显示掩码与指纹）
-sudo rt logs -f                # 实时日志
-sudo rt config edit            # 编辑配置（改完 rt restart 生效）
-sudo rt sudo enable            # 开启「永久提权授权」（见下）
-sudo rt proxy nginx            # 生成 nginx 反向代理模板
-sudo rt upgrade                # 升级到最新版（失败自动回滚）
-sudo rt uninstall              # 卸载（默认保留配置与 token）
-sudo rt uninstall --purge      # 彻底清除（含配置、token、运行用户）
-sudo rt doctor                 # 自检：权限 / 端口 / TLS / 服务 / 配置
-sudo rt help                   # 全部命令
+curl -fsSL https://github.com/GotKiCry/rtctl/releases/latest/download/install.sh \
+  -o /tmp/rt-install.sh
+sudo sh /tmp/rt-install.sh
 ```
 
----
-
-## 三分钟上手
-
-**目标服务器上**（如果没用上面的安装脚本，也可以手工跑）：
+用户级安装（不需要 root）：
 
 ```bash
-./rtctl-agent -init        # 第一次运行：生成 agent.conf + 随机 token
-./rtctl-agent              # 默认后台启动；确认监听成功后才返回
+sh /tmp/rt-install.sh install --scope user
 ```
 
-启动后终端只打印一次连接信息和管理提示，不会持续输出日志：
+安装脚本会下载并校验对应架构的二进制，生成随机端口和 token，配置服务并执行健康检查。系统级安装创建专用 `rtctl` 用户；用户级安装使用当前用户。
 
-```text
-rtctl-agent 启动 ✔  (id=web-01)
-  监听地址 : :41234（ws，路径 /ws）
-  本机地址 : 192.168.1.5:41234 / 127.0.0.1:41234
-  防火墙   : 已放行 41234/tcp（ufw）
-  设备 token: <已隐藏>（查看: rt token show）
-  允许提权 : false
-  配置文件 : /home/user/.rtctl/agent.conf
-  连接示例 :
-    rtctl 192.168.1.5:41234 <token> 'uptime'   # 从控制机执行
-  后台 PID  : 1234
-  日志文件 : /home/user/.rtctl/agent.log（每个约 10MB，保留 3 个备份）
-  查看日志 : ./rtctl-agent -logs -follow -log-file "/home/user/.rtctl/agent.log"
-  查看状态 : ./rtctl-agent -status -pid-file "/home/user/.rtctl/agent.pid"
-  停止服务 : ./rtctl-agent -stop -pid-file "/home/user/.rtctl/agent.pid"
-```
+防火墙仅在 root 或免密 `sudo` 可用时自动配置；其他环境不会修改防火墙，只检查端口是否可连通。
 
-**你自己电脑上**（把 IP、端口、token 换成上面的）：
+### 2. 获取连接信息
+
+系统级安装：
 
 ```bash
-./rtctl 192.168.1.5:41234 4a82... 'uptime'              # 执行一条命令
-./rtctl 192.168.1.5:41234 4a82... 'df -h && free -m'    # 多命令拼一起
-./rtctl -version                                        # 查看版本
+sudo rt status
+sudo rt token show --reveal
 ```
 
-结果包含**命令输出 + 退出码**；命令失败（如退出码 42），rtctl 也返回 42，方便脚本判断。
-
-### 后台运行与日志
+用户级安装无需 `sudo`：
 
 ```bash
-./rtctl-agent -status           # 查看本机 agent 是否运行
-./rtctl-agent -stop             # 停止后台 agent；关闭终端不会停止它
-./rtctl-agent -foreground       # 前台运行，供调试或服务管理器托管
-./rtctl-agent -logs             # 查看最近 100 行日志（自带着色，Windows/Linux 通用）
-./rtctl-agent -logs -follow     # 实时跟随日志（Ctrl+C 退出；轮转后自动跟上新文件）
-./rtctl-agent -logs -lines 500  # 多看几行
+rt status
+rt token show --reveal
 ```
 
-Windows 上是同一条命令（PowerShell / CMD 均可）：
+请通过安全渠道保存和传递 token，不要将其提交到仓库或贴入公开日志。
+
+### 3. 在控制机下载 client
+
+Linux amd64：
+
+```bash
+curl -fsSL https://github.com/GotKiCry/rtctl/releases/latest/download/rtctl-linux-amd64 \
+  -o rtctl
+chmod +x rtctl
+```
+
+其他平台从 [Releases](https://github.com/GotKiCry/rtctl/releases/latest) 下载对应资产。
+
+### 4. 执行第一条命令
+
+```bash
+./rtctl 192.168.1.5:41234 '<token>' 'uptime'
+```
+
+Windows PowerShell：
 
 ```powershell
-.\rtctl-agent.exe -logs
-.\rtctl-agent.exe -logs -follow
+.\rtctl.exe 192.168.1.5:41234 '<token>' 'uptime'
 ```
 
-- `-logs` 直接读取本机日志文件，无需 journalctl/tail，终端里按事件着色：绿=启动/成功（exit=0）、红=失败/非零退出/超时、黄=命令开始（exec）、品红=文件传输（file_put/file_get）、蓝=shell 会话、青=client 接入/断开、暗色=时间戳。输出经管道/重定向时自动纯文本；`-no-color` 或 `NO_COLOR` 环境变量可强制关闭。
-- 查看时会自动脱敏（token / 私钥不会原样显示）。日志文件本身始终是纯文本（0600），也可以用 `tail -F ~/.rtctl/agent.log` 直接看。
-- 默认日志为 `~/.rtctl/agent.log`，PID 文件为 `~/.rtctl/agent.pid`；可用 `-log-file`、`-pid-file` 修改。修改 PID 路径后，`-status`、`-stop` 也要传相同路径。
-- 每个日志文件约 10MB，自动保留 `.1` 到 `.3` 三个轮转备份。前台模式的运行日志也写入文件，不会持续刷终端。
-- 端口占用、配置或 TLS 错误会让启动命令直接失败，不会假报后台启动成功；端口被占时启动报错会附排查提示，`-status` 在「未运行但端口被占」时也会提醒存在未受 PID 文件管理的旧实例或其他程序。
-- 通过安装脚本部署的机器继续使用 `rt status`、`rt logs -f`、`rt stop`（新版 agent 上 `rt logs` 自动走内置查看器）；服务由 systemd/OpenRC/nohup 托管，不要再手工启动第二个实例。
+命令输出和退出码会返回控制机，便于脚本判断执行结果。
 
----
+## 常用操作
 
-## 还能做什么
-
-| 操作 | 命令 |
-|---|---|
-| 执行命令 | `rtctl <IP>:<端口> <token> '命令'` |
-| 交互式终端 | `rtctl -server ws://IP:端口/ws shell -token <token>` |
-| 查看设备信息 | `rtctl -server ws://IP:端口/ws list` |
-| 传文件上去 | `rtctl -server ws://IP:端口/ws file-put -token <token> 本地文件 /远端/路径` |
-| 把文件拉回来 | `rtctl -server ws://IP:端口/ws file-get -token <token> /远端/路径 本地文件` |
-| 结构化输出 | 加 `-json` |
+### client
 
 ```bash
-# 带超时（50 秒后连子进程一起结束）
-rtctl <IP>:<端口> <token> -c 'sleep 999' -timeout 50000
+# 查看设备信息
+rtctl -server ws://192.168.1.5:41234/ws list
+
+# 指定超时和工作目录
+rtctl -server ws://192.168.1.5:41234/ws exec \
+  -token '<token>' -timeout 50000 -workdir /tmp -c 'df -h'
+
+# 交互式终端
+rtctl -server ws://192.168.1.5:41234/ws shell -token '<token>'
+
+# 上传和下载
+rtctl -server ws://192.168.1.5:41234/ws file-put \
+  -token '<token>' ./local.txt /tmp/remote.txt
+rtctl -server ws://192.168.1.5:41234/ws file-get \
+  -token '<token>' /tmp/remote.txt ./local.txt
 ```
 
----
+自动化输出可添加 `-json`；完整参数使用 `rtctl -h` 查看。
+
+### Linux 服务管理
+
+```bash
+sudo rt status                 # 服务、端口和版本
+sudo rt logs -f                # 实时日志
+sudo rt restart                # 重启并检查健康状态
+sudo rt doctor                 # 安装与安全自检
+sudo rt config edit            # 编辑配置（之后执行 rt restart）
+sudo rt upgrade                # 升级，失败自动回滚
+sudo rt uninstall              # 默认保留配置和 token
+```
+
+用户级安装使用相同子命令，但不加 `sudo`。运行 `rt help` 查看全部管理命令。
+
+### 手工运行 agent
+
+不使用安装脚本时：
+
+```bash
+./rtctl-agent -init            # 生成 ~/.rtctl/agent.conf 和随机 token
+./rtctl-agent                  # 默认后台启动，监听就绪后返回
+./rtctl-agent -status          # 查看状态
+./rtctl-agent -logs -follow    # 跟随日志
+./rtctl-agent -stop            # 停止后台实例
+```
+
+服务管理器托管时必须使用 `-foreground`。默认日志为 `~/.rtctl/agent.log`，每个约 10MB，保留 3 个轮转备份；`-logs` 查看时会脱敏，管道或重定向输出自动禁用颜色。
+
+## 升级与旧版本覆盖
+
+使用 `v1.0.0` 及后续版本时：
+
+```bash
+sudo rt upgrade --check
+sudo rt upgrade
+```
+
+用户级安装执行 `rt upgrade`，无需 `sudo`。
+
+从早期版本或误发的高版本覆盖到 `v1.0.0`，请使用最新 `install.sh` 重新安装，不要直接用旧版 `rt upgrade` 替换 agent。新版安装脚本会更新服务单元并保留既有配置和 token。
 
 ## TLS 与反向代理
 
-默认不启用 TLS（内网直连够用；**公网务必启用**）。三种方式：
+默认连接为明文 `ws://`，公网或共享网络必须启用 TLS。
 
-**1. 自签（脚本一把生成 CA + 服务器证书）**
+自动生成自签 CA 和服务器证书：
 
 ```bash
 sudo rt install --tls-generate
 ```
 
-脚本会打印**控制机导入 CA** 的命令，照做即可（client 走系统信任库，不导入会报 `x509: certificate signed by unknown authority`）：
+client 默认使用系统信任库。自签 CA 可按安装输出导入控制机，也可在连接时通过 `-cafile` 指定；`-insecure` 会跳过证书校验，仅限调试使用。
 
-```bash
-# Debian/Ubuntu 控制机
-sudo cp rtctl-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates
-# RHEL 系控制机
-sudo cp rtctl-ca.crt /etc/pki/ca-trust/source/anchors/ && sudo update-ca-trust
-# Windows 控制机：把 rtctl-ca.crt 导入「受信任的根证书颁发机构」
-```
-
-**2. 自己的证书**
+也可以使用已有证书：
 
 ```bash
 sudo rt config set tls_cert /etc/rtctl/tls/agent.crt
-sudo rt config set tls_key  /etc/rtctl/tls/agent.key
+sudo rt config set tls_key /etc/rtctl/tls/agent.key
 sudo rt restart
 ```
 
-**3. 反向代理（公网推荐：nginx/caddy 终止 TLS，agent 只监听回环）**
+启用 TLS 后使用完整 `wss://` 地址：
 
 ```bash
-sudo rt proxy nginx      # 生成配置模板（caddy 用 rt proxy caddy）
+rtctl -server wss://example.com/ws exec -token '<token>' -c 'uptime'
+
+# 自签 CA 未导入系统信任库时
+rtctl -server wss://example.com/ws -cafile ./rtctl-ca.crt \
+  exec -token '<token>' -c 'uptime'
 ```
 
-nginx 要点（`proxy_read_timeout` 必须够大，否则长命令会被断）：
-
-```nginx
-location /rt/ {
-    proxy_pass http://127.0.0.1:41234/;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-    proxy_read_timeout 3600s;
-}
-```
-
-控制机连接（**开 TLS 后不能用快捷入口**，必须给完整地址）：
+需要反向代理或路径前缀时：
 
 ```bash
-rtctl -server wss://example.com/rt/ws exec -token <token> -c 'uptime'
+sudo rt proxy nginx             # 也支持 rt proxy caddy
+sudo rt config set ws_path /rt/ws
+sudo rt restart
 ```
 
-需要把 WebSocket 挂在子路径下（不经反代重写）时，让 agent 自己带路径：
+对应连接地址为 `wss://example.com/rt/ws`。
 
-```bash
-sudo rt config set ws_path /rt/ws && sudo rt restart
-```
+## 配置
 
----
-
-## 特权命令（root）
-
-agent 以普通用户 `rtctl` 运行，特权命令需要授权。**两种方式**：
-
-| 方式 | 命令 | 特点 |
-|---|---|---|
-| **永久授权** | `sudo rt sudo enable` | 写 `/etc/sudoers.d/rtctl-agent`（NOPASSWD，仅放行 `/bin/sh` 等）。之后 `-sudo` 直接生效。⚠️ **任何持有 token 的人都能获得 root** |
-| **临时授权** | 执行时加 `-sudo -sudo-ask` | 不写 sudoers，当场输入 root 密码；agent 用 `sudo -S` 使用，不落盘、不进日志 |
-
-```bash
-# 临时授权：当场输入 root 密码
-rtctl -server ws://IP:端口/ws exec -token <token> -sudo -sudo-ask -c 'systemctl restart nginx'
-
-# 永久授权已开启时：无需密码
-rtctl -server ws://IP:端口/ws exec -token <token> -sudo -confirm-sudo -c 'systemctl restart nginx'
-
-# 关闭永久授权
-sudo rt sudo disable
-```
-
-三层审批仍然生效：agent 要开 `allow_sudo`（安装时 `--allow-sudo` 或 `rt config set allow_sudo true`）、客户端要显式 `-sudo` 并确认、服务器侧要有 sudoers 规则（永久授权）或密码（临时授权）。缺哪层都会明确报错（`sudo_disabled` / `sudo_denied`），**不会静默降级执行**。
-
----
-
-## agent 的配置文件（agent.conf）
-
-安装脚本写入 `/etc/rtctl/agent.conf`（0600，属主 `rtctl`）；手工运行时默认在 `~/.rtctl/agent.conf`：
+系统级配置：`/etc/rtctl/agent.conf`；用户级及手工运行配置：`~/.rtctl/agent.conf`。
 
 ```ini
-listen = :41234         # 监听地址（脚本安装时随机生成）
-id = web-01             # 设备名
-token = 4a82...         # 连接钥匙
-tls_cert =              # 两个都填 = 启用 WSS（推荐公网）
+listen = :41234
+id = web-01
+token = <token>
+tls_cert =
 tls_key =
-allow_sudo = false      # 是否允许特权命令
-ws_path = /ws           # WebSocket 路径（反向代理/子路径场景可改）
+allow_sudo = false
+ws_path = /ws
 ```
 
-查找顺序：`-config` 参数 → `~/.rtctl/agent.conf` → exe 同目录 → 当前目录。
+手工运行时查找顺序为：`-config` 指定路径、`~/.rtctl/agent.conf`、可执行文件同目录、当前目录。
 
----
+## 从源码构建
 
-## 安全提示
-
-1. **token 就是钥匙**：走安全渠道分发，别进代码/仓库/群聊。`rt token show --reveal` 才显示完整值。
-2. **公网务必 TLS**：`rt install --tls-generate` 或反向代理；否则命令与 token 明文传输。
-3. **永久提权授权等于交出 root**：`rt sudo enable` 后，token 泄露 = root 泄露。优先用临时授权。
-4. agent 只装在你可信的机器上；它等于远程 Shell。
-5. 升级用 `rt upgrade`（自动校验、原子替换、健康检查失败自动回滚）。
-
----
-
-## 自己构建
+需要 Go 1.25 或更高版本。
 
 ```bash
-# Linux / macOS
-sh ./build.sh                 # 产出 bin/ 下 6 个二进制 + install.sh + SHA256SUMS.txt
-
-# Windows（PowerShell 7）
-pwsh ./build.ps1
+go test ./...
+sh ./build.sh                 # Linux / macOS
+pwsh ./build.ps1              # Windows PowerShell 7
 ```
 
-需要 Go 1.25+。产物：
+构建产物写入已忽略的 `bin/`：6 个二进制、`install.sh` 和 `SHA256SUMS.txt`。
 
-| 文件 | 用途 |
-|---|---|
-| `rtctl-linux-amd64` / `rtctl-linux-arm64` | 控制端（Linux） |
-| `rtctl-agent-linux-amd64` / `rtctl-agent-linux-arm64` | 被控端（Linux） |
-| `rtctl.exe` / `rtctl-agent.exe` | Windows |
-| `install.sh` | 一键安装/管理脚本（`rt`） |
-| `SHA256SUMS.txt` | 校验值（LF 行尾，`sha256sum -c` 可用） |
+```bash
+cd bin && sha256sum -c SHA256SUMS.txt
+```
 
-详细协议说明见 [DESIGN.md](DESIGN.md)；安装脚本设计见 [docs/rtctl-install-script-plan.md](docs/rtctl-install-script-plan.md)。
+## 文档
+
+- [架构与协议](docs/architecture.md)
+- [变更记录](CHANGELOG.md)
+- [开发说明](CONTRIBUTING.md)
+- [安全政策与使用边界](SECURITY.md)
+
+## 许可证
+
+[MIT License](LICENSE)

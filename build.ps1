@@ -58,4 +58,4 @@ $sumsPath = Join-Path $out 'SHA256SUMS.txt'
 $bytes = [IO.File]::ReadAllBytes($sumsPath)
 if ($bytes -contains 13) { throw 'SHA256SUMS.txt 含 CR，必须是 LF' }
 Write-Host "SHA256SUMS.txt written ($($lines.Count) entries, LF)" -ForegroundColor Green
-Write-Host "提示：发布前核对 install.sh 的 sha256 并写进 RELNOTES（README 的 --pinned-sha256 用它）" -ForegroundColor Yellow
+Write-Host "提示：发布前核对 install.sh 的 sha256，并更新 CHANGELOG 与 Release 说明" -ForegroundColor Yellow

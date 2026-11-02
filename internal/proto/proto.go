@@ -87,7 +87,7 @@ type ExecPayload struct {
 	TimeoutMS int    `json:"timeout_ms,omitempty"` // 0 表示不限制
 	Workdir   string `json:"workdir,omitempty"`
 	Stdin     string `json:"stdin,omitempty"` // 写入进程 stdin 后关闭（非交互输入）
-	Sudo      bool   `json:"sudo,omitempty"`  // true = 请求 root 提权执行（需被控端开启 -allow-sudo；审批语义见 DESIGN.md）
+	Sudo      bool   `json:"sudo,omitempty"`  // true = 请求 root 提权执行（需被控端开启 -allow-sudo；审批语义见 docs/architecture.md）
 	// SudoPassword 非空 = 临时提权：agent 以 `sudo -S` 从 stdin 读该密码（首行），
 	// 不依赖 sudoers NOPASSWD。仍需被控端开启 -allow-sudo。
 	SudoPassword string `json:"sudo_password,omitempty"`
