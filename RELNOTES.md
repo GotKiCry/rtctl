@@ -60,7 +60,7 @@ sha256sum -c SHA256SUMS.txt
 `install.sh` SHA256：
 
 ```text
-b70b067608de8157e7b30e5ddc290d69eca462c5e0b9191cd8dbda7993e5a919
+86a57c830b6bd12f66464891b33ac28e10ed2877e0383e887e3baeeed106a70f
 ```
 
 也可使用 `sh install.sh install --pinned-sha256 <上面的哈希>` 校验安装脚本本身。

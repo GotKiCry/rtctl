@@ -41,7 +41,7 @@ if grep -q '@@' bin/install.sh; then
 fi
 printf 'built: install.sh (%s)\n' "$VERSION"
 
-# SHA256SUMS.txt：LF 行尾（Linux 端 sha256sum -c / awk 才不会把 \r 当文件名）
+# SHA256SUMS.txt：LF 行尾、纯文件名（兼容安装器的 awk 精确匹配）
 cd bin
 rm -f SHA256SUMS.txt
 if command -v sha256sum >/dev/null 2>&1; then
@@ -50,8 +50,9 @@ else
   HASHER="shasum -a 256"
 fi
 for f in $(ls -1 | grep -v '^SHA256SUMS.txt$' | sort); do
+  # Windows Git Bash 会输出 *filename，统一成两个空格分隔的文本格式。
   # shellcheck disable=SC2086
-  $HASHER "$f"
+  $HASHER "$f" | sed 's/^\([[:xdigit:]]\{64\}\) \*/\1  /'
 done > SHA256SUMS.txt
 if grep -q "$(printf '\r')" SHA256SUMS.txt; then
   printf 'SHA256SUMS.txt 含 CR，必须是 LF\n' >&2

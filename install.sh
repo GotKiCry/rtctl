@@ -993,7 +993,7 @@ sums_expected() {
     _rt_se_asset=$1
     _rt_se_sums=$2
     [ -f "$_rt_se_sums" ] || return 1
-    tr -d '\r' <"$_rt_se_sums" | awk -v f="$_rt_se_asset" '$2 == f {print $1; exit}'
+    tr -d '\r' <"$_rt_se_sums" | awk -v f="$_rt_se_asset" '{name=$2; sub(/^\*/, "", name); if (name == f) {print $1; exit}}'
 }
 
 # 校验：0 通过；1 不匹配；2 清单无该项；3 无校验工具
