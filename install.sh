@@ -2258,11 +2258,14 @@ cmd_upgrade() {
     if [ "$RT_SCOPE" = system ]; then _rt_u_owner='root:root'; fi
     atomic_put "$RT_DL_AGENT" "$RT_BIN_AGENT" 0755 "$_rt_u_owner" || die "$EX_FAIL" "替换二进制失败"
     if [ -n "$RT_DL_CLIENT" ]; then atomic_put "$RT_DL_CLIENT" "$RT_BIN_CLIENT" 0755 "$_rt_u_owner" || true; fi
-    _rt_u_selfsrc=$(self_script_source || true)
+    _rt_u_selfsrc=$RT_DL_SCRIPT
+    if [ -z "$_rt_u_selfsrc" ]; then _rt_u_selfsrc=$(self_script_source || true); fi
     if [ -n "$_rt_u_selfsrc" ]; then atomic_put "$_rt_u_selfsrc" "$RT_BIN_DIR/$RT_NAME" 0755 "$_rt_u_owner" || true; fi
     probe_agent_caps "$RT_BIN_AGENT"
     RT_AGENT_VERSION=$(agent_version_of "$RT_BIN_AGENT")
     RT_AGENT_SHA256=$_rt_u_newsha
+    install_service_unit
+    svc_daemon_reload
     if svc_start && health_check "$RT_LISTEN_STATE"; then
         RT_UPGRADED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '')
         RT_LAST_UPGRADE_RESULT='ok'
@@ -2274,6 +2277,11 @@ cmd_upgrade() {
     warn "升级后健康检查失败，开始回滚"
     if [ -f "$RT_PREV_BINARY" ]; then
         atomic_put "$RT_PREV_BINARY" "$RT_BIN_AGENT" 0755 "$_rt_u_owner" || true
+        probe_agent_caps "$RT_BIN_AGENT"
+        RT_AGENT_VERSION=$(agent_version_of "$RT_BIN_AGENT")
+        RT_AGENT_SHA256=$(sha256_of "$RT_BIN_AGENT" || true)
+        install_service_unit
+        svc_daemon_reload
         RT_ROLLBACK_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '')
         RT_ROLLBACK_FROM_VERSION=$RT_TAG
         RT_LAST_UPGRADE_RESULT='rolled_back'

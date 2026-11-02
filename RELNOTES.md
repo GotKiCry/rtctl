@@ -35,19 +35,11 @@ curl -fsSL https://github.com/GotKiCry/rtctl/releases/latest/download/install.sh
 sh /tmp/rt-install.sh install --scope user
 ```
 
-从已有 `rt` 的旧版本（包括误发的高版本）升级到本版：
+从旧版本（包括误发的高版本）覆盖到本版，请使用上面的新版 `install.sh`，不要使用旧版 `rt upgrade` 直接替换 agent。覆盖安装会更新 agent、管理脚本和服务单元，并保留既有配置和 token。
 
-```bash
-sudo rt upgrade --release v1.0.0
-```
+> 旧版服务单元缺少本版需要的 `-foreground`，必须先由新版安装脚本重写单元。
 
-用户级安装无需 sudo：
-
-```bash
-rt upgrade --release v1.0.0
-```
-
-没有 `rt` 的旧版本可直接使用新版 `install.sh` 覆盖安装；既有配置和 token 会保留。
+从本版之后的升级可使用 `sudo rt upgrade`（用户级安装执行 `rt upgrade`）；升级会同步更新管理脚本和服务单元，健康检查失败时自动回滚。
 
 防火墙仅在 root 或免密 sudo 可用时自动放行；其他环境不修改防火墙，只检查端口是否可连通。
 
@@ -68,7 +60,7 @@ sha256sum -c SHA256SUMS.txt
 `install.sh` SHA256：
 
 ```text
-24bd20cf4f3d7d0eb532d413381f4a6b20a5d827d32d150fd695539f515272cb
+b70b067608de8157e7b30e5ddc290d69eca462c5e0b9191cd8dbda7993e5a919
 ```
 
 也可使用 `sh install.sh install --pinned-sha256 <上面的哈希>` 校验安装脚本本身。
