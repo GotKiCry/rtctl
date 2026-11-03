@@ -5,7 +5,6 @@ package agent
 import (
 	"io"
 	"os/exec"
-	"strconv"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -15,10 +14,13 @@ import (
 
 // pipeSession Windows 上的 cmd 管道模式（不是真终端，普通命令完全可用）。
 type pipeSession struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	output io.Reader
-	done   chan struct{}
+	cmd       *exec.Cmd
+	process   execProcess
+	stdin     io.WriteCloser
+	output    io.Reader
+	done      chan struct{}
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func newShellSession() (shellSession, error) {
@@ -29,13 +31,20 @@ func newShellSession() (shellSession, error) {
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		stdin.Close()
 		return nil, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		stdin.Close()
+		stdout.Close()
 		return nil, err
 	}
-	if err := cmd.Start(); err != nil {
+	process, err := startExecProcess(cmd, false)
+	if err != nil {
+		stdin.Close()
+		stdout.Close()
+		stderr.Close()
 		return nil, err
 	}
 	// stdout 与 stderr 并发拷贝合并：串行拷贝会在对端管道写满时死锁子进程
@@ -50,7 +59,7 @@ func newShellSession() (shellSession, error) {
 		cmd.Wait()
 		close(done)
 	}()
-	return &pipeSession{cmd: cmd, stdin: stdin, output: pr, done: done}, nil
+	return &pipeSession{cmd: cmd, process: process, stdin: stdin, output: pr, done: done}, nil
 }
 
 func (s *pipeSession) Stdin() io.Writer { return s.stdin }
@@ -59,34 +68,30 @@ func (s *pipeSession) Output() io.Reader { return s.output }
 
 func (s *pipeSession) Resize(cols, rows uint16) error { return nil } // 管道模式不支持
 
-func (s *pipeSession) Wait() error { <-s.done; return nil }
+func (s *pipeSession) closeProcess() error {
+	s.closeOnce.Do(func() { s.closeErr = s.process.Close() })
+	return s.closeErr
+}
 
-// Close 优雅关闭：写入 exit 让 cmd 处理完缓冲输入后自然退出，最多等 2 秒再强杀。
+func (s *pipeSession) Wait() error {
+	<-s.done
+	return s.closeProcess()
+}
+
+// Close 先尝试优雅退出，最多等 2 秒，再确保整个 Job 及其子进程结束。
 func (s *pipeSession) Close() error {
 	s.stdin.Write([]byte("exit\r\n"))
 	select {
 	case <-s.done:
 	case <-time.After(2 * time.Second):
 	}
+	killErr := s.process.Kill()
 	s.stdin.Close()
-	if s.cmd.Process != nil {
-		s.cmd.Process.Kill()
+	closeErr := s.closeProcess()
+	if killErr != nil {
+		return killErr
 	}
-	return nil
-}
-
-// killProcessTree Windows 上结束命令和所有子进程：
-// TerminateProcess 只杀直接子进程，孙进程会存活并继续持有输出管道，
-// 因此用 taskkill /T 级联终止。
-// sudo 参数忽略：计划任务以 SYSTEM 运行，本就拥有全部权限。
-func killProcessTree(cmd *exec.Cmd, sudo bool) {
-	if cmd.Process == nil {
-		return
-	}
-	tk := exec.Command("taskkill", "/PID", strconv.Itoa(cmd.Process.Pid), "/T", "/F")
-	tk.Stdout = io.Discard
-	tk.Stderr = io.Discard
-	_ = tk.Run()
+	return closeErr
 }
 
 // decodeConsoleOutput 把 Windows 控制台输出转换为 UTF-8。

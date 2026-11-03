@@ -65,7 +65,7 @@
 
 - Linux 用 `/bin/sh -c`，Windows 用 `cmd /C`（Windows 上特殊处理了命令行转义，防止引号被吃掉导致命令悄悄变样）。
 - 输出每 32KB 一段回传。
-- 超时/被取消时，会把**命令和它生出来的所有子进程**全部结束（Linux 杀进程组，Windows 用 `taskkill /T`），不留后台孤儿。
+- 超时/被取消时，会把**命令和它生出来的所有子进程**全部结束（Linux 杀进程组；Windows 用每条命令独立的 Job Object，根进程先暂停并加入 Job，再恢复运行），不留后台孤儿。
 
 ### 3.3 交互终端（shell）
 
@@ -98,7 +98,7 @@
 
 ### 4.1 agent（`cmd/agent` + `internal/agent`）
 
-- 平台差异放在 `shell_linux.go` / `shell_windows.go`（用 build tag 区分编译）：
+- 平台差异放在 `shell_*.go` / `process_*.go`（用 build tag 区分编译）：
   - Linux：真终端 + `sh`；
   - Windows：`cmd.exe` 管道模式。
 - 超时/取消会把命令和它生出的所有子进程一并结束（见 3.2）。

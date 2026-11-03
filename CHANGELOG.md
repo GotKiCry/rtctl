@@ -4,10 +4,26 @@
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-03
+
 ### Changed
 
 - 重写 README，补充开发说明、安全政策和变更记录。
 - 架构文档移至 `docs/architecture.md`，移除过期设计草案、重复发布脚本和本地构建产物。
+
+### Fixed
+
+- 修复 Windows exec 超时/取消时双重终止导致子进程残留和结果延迟，以及正常退出后按旧 PID 误清理的风险；Windows exec 与 shell 统一使用 Job Object 管理进程树。
+
+### Upgrade notes
+
+本次更新不改变配置文件或 WebSocket 协议。Linux 可通过 `rt upgrade` 或新版安装脚本升级；Windows 请替换 `rtctl-agent.exe` 并重启 Agent 实例，使进程树清理修复生效。
+
+`v1.0.1` 的 `install.sh` SHA256：
+
+```text
+150482777c3a6669ccbf957ce1a743143595051cc13fd550f447b47fa0fac674
+```
 
 ## [1.0.0] - 2026-11-02
 
@@ -46,5 +62,6 @@
 86a57c830b6bd12f66464891b33ac28e10ed2877e0383e887e3baeeed106a70f
 ```
 
-[Unreleased]: https://github.com/GotKiCry/rtctl/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/GotKiCry/rtctl/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/GotKiCry/rtctl/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/GotKiCry/rtctl/releases/tag/v1.0.0

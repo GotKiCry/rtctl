@@ -199,11 +199,9 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 	}()
 
 	argv, sysProc := shellExecArgs(p.Cmd, p.Sudo, p.SudoPassword)
-	// sudo 路径不能用 CommandContext：ctx 取消时它会抢先杀掉直接子进程 sudo，
-	// 而 sudo 已把 /bin/sh 与孙进程放进新会话/进程组，剩下的树会漏杀。
-	// 这里用普通 exec.Command，由下方 kill goroutine 统一经 /proc 遍历杀整树。
+	// Linux sudo 和 Windows 都由平台进程树统一终止，不能让 CommandContext 抢先杀根进程。
 	var cmd *exec.Cmd
-	if p.Sudo && runtime.GOOS == "linux" {
+	if runtime.GOOS == "windows" || (p.Sudo && runtime.GOOS == "linux") {
 		cmd = exec.Command(argv[0], argv[1:]...)
 	} else {
 		cmd = exec.CommandContext(ctx, argv[0], argv[1:]...)
@@ -228,18 +226,32 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 	}
 	cmd.Stdout = pw
 	cmd.Stderr = pw
-	if err := cmd.Start(); err != nil {
+	process, err := startExecProcess(cmd, p.Sudo)
+	if err != nil {
 		pw.Close()
 		pr.Close()
 		sendExecOutput(sink, m.ID, "", true, 1, "启动进程失败: "+err.Error(), proto.ErrorCodeStartFailed, false)
 		return
 	}
-	// 超时/取消时结束命令和所有子进程（孙进程也一起）。
-	// 结束原因（timeout/killed）由下方结束帧与日志统一带出，此处不重复打印。
+	execDone := make(chan struct{})
+	killDone := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		if ctx.Err() != nil {
-			killProcessTree(cmd, p.Sudo)
+		defer close(killDone)
+		select {
+		case <-ctx.Done():
+			if err := process.Kill(); err != nil {
+				log.Printf("[agent] exec 终止进程树失败 exec=%s: %v", m.ID, err)
+			}
+			// 即使清理异常，也不能让继承输出管道的进程把请求永久卡住。
+			time.AfterFunc(2*time.Second, func() { pr.Close() })
+		case <-execDone:
+		}
+	}()
+	defer func() {
+		close(execDone)
+		<-killDone
+		if err := process.Close(); err != nil {
+			log.Printf("[agent] exec 释放进程树失败 exec=%s: %v", m.ID, err)
 		}
 	}()
 	waitCh := make(chan error, 1)
