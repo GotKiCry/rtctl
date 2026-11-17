@@ -48,15 +48,13 @@ sh /tmp/rt-install.sh install --scope user
 系统级安装：
 
 ```bash
-sudo rt status
-sudo rt token show --reveal
+sudo rt status --all
 ```
 
 用户级安装无需 `sudo`：
 
 ```bash
-rt status
-rt token show --reveal
+rt status --all
 ```
 
 请通过安全渠道保存和传递 token，不要将其提交到仓库或贴入公开日志。
@@ -114,12 +112,14 @@ rtctl -server ws://192.168.1.5:41234/ws file-get \
 ### Linux 服务管理
 
 ```bash
+sudo rt                        # 等价于 rt status
 sudo rt status                 # 服务、端口和版本
+sudo rt status --all           # 额外显示完整 token，仅复制给可信 Agent
 sudo rt logs -f                # 实时日志
 sudo rt restart                # 重启并检查健康状态
 sudo rt doctor                 # 安装与安全自检
 sudo rt config edit            # 编辑配置（之后执行 rt restart）
-sudo rt upgrade                # 升级，失败自动回滚
+sudo rt update                 # 升级，失败自动回滚（等价于 rt upgrade）
 sudo rt uninstall              # 默认保留配置和 token
 ```
 
@@ -144,11 +144,11 @@ sudo rt uninstall              # 默认保留配置和 token
 使用 `v1.0.0` 及后续版本时：
 
 ```bash
-sudo rt upgrade --check
-sudo rt upgrade
+sudo rt update --check
+sudo rt update
 ```
 
-用户级安装执行 `rt upgrade`，无需 `sudo`。
+`rt update` 等价于 `rt upgrade`。用户级安装执行 `rt update`，无需 `sudo`。
 
 从早期版本或误发的高版本覆盖到 `v1.0.0`，请使用最新 `install.sh` 重新安装，不要直接用旧版 `rt upgrade` 替换 agent。新版安装脚本会更新服务单元并保留既有配置和 token。
 

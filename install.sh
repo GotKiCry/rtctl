@@ -1790,7 +1790,7 @@ print_guidance() {
 }
 
 # ---------------------------------------------------------------------------
-# token 读取（只有一条完整取值路径：token show --reveal）
+# token 读取（完整值由 token show --reveal 或 status --all 显式输出）
 # ---------------------------------------------------------------------------
 token_value() {
     [ -f "$RT_CONF" ] || return 1
@@ -2145,6 +2145,15 @@ cmd_status() {
     fi
     say "TLS        : ${RT_TLS_ENABLED:-unknown}"
     say "token 指纹 : ${RT_TOKEN_FP:-unknown}"
+    if [ "$RT_ALL" = 1 ]; then
+        _rt_cs_token=$(token_value 2>/dev/null || true)
+        if [ -n "$_rt_cs_token" ]; then
+            say "token      : $_rt_cs_token"
+            warn "已输出完整 token：仅复制给可信 Agent，勿贴群聊、工单、截图或公开日志"
+        else
+            warn "无法读取完整 token：请使用 sudo $RT_NAME status --all"
+        fi
+    fi
     say "安装时间   : ${RT_INSTALLED_AT:-unknown}"
     if [ -n "${RT_PORT_STATE:-}" ]; then
         if port_in_use "$RT_PORT_STATE"; then
@@ -2417,7 +2426,7 @@ cmd_config() {
             done
             say "配置文件   = $RT_CONF"
             hr
-            hint "改配置：$RT_NAME config set <key> <value> [--restart]；完整 token 只有一条路径：$RT_NAME token show --reveal"
+            hint "改配置：$RT_NAME config set <key> <value> [--restart]；完整 token：$RT_NAME status --all 或 $RT_NAME token show --reveal"
             ;;
         get)
             _rt_cf_key=${RT_REST%% *}
@@ -2426,7 +2435,7 @@ cmd_config() {
             config_key_allowed "$_rt_cf_key" || _rt_cf_rc=$?
             case "$_rt_cf_rc" in
                 0) : ;;
-                2) die "$EX_NOSECRET" "config get token 被拒绝：完整 token 只有一条取值路径 —— $RT_NAME token show --reveal" ;;
+                2) die "$EX_NOSECRET" "config get token 被拒绝：请用 $RT_NAME status --all 或 $RT_NAME token show --reveal" ;;
                 *) die "$EX_USAGE" "未知配置键：$_rt_cf_key（支持 listen/id/tls_cert/tls_key/allow_sudo/ws_path）" ;;
             esac
             conf_read_key "$_rt_cf_key"
@@ -3002,31 +3011,37 @@ cmd_version() {
 }
 
 cmd_help() {
-    say "rtctl $RT_VERSION —— Linux 安装与管理脚本（安装后命令名 rt）"
+    say "rt —— Linux 远程主机管理（$RT_VERSION）"
     say ''
-    say "用法: $RT_NAME <命令> [子命令] [选项]"
+    say '常用命令'
+    say "  $RT_NAME                       查看运行状态"
+    say "  $RT_NAME status --all          查看状态并显示完整 token"
+    say "  $RT_NAME logs [-f]             查看日志，-f 持续跟踪"
+    say "  $RT_NAME doctor                检查服务和安全配置"
+    say "  $RT_NAME update [--check]      升级；--check 只检查新版本"
     say ''
-    printf '%-10s %-8s %-6s %s\n' '命令' '风险' '需root' '说明'
-    hr
-    rt_cmd_table | while IFS="$RT_TAB" read -r _rt_h_name _rt_h_handler _rt_h_risk _rt_h_root _rt_h_desc; do
-        [ -n "$_rt_h_name" ] || continue
-        printf '%-10s %-8s %-6s %s\n' "$_rt_h_name" "$_rt_h_risk" "$_rt_h_root" "$_rt_h_desc"
-    done
-    hr
-    say '全局选项: --scope system|user  --prefix DIR  --yes  --json  --quiet  --verbose'
-    say '安装选项: --port N  --listen ADDR  --id NAME  --ws-path /rt/ws  --tls-generate'
-    say '          --tls-cert FILE --tls-key FILE  --allow-sudo  --sudo ask|nopasswd'
-    say '          --proxy-domain DOMAIN  --base-url URL  --release vX.Y.Z  --agent-src FILE'
-    say '          --pinned-sha256 HEX  --no-firewall  --allow-from CIDR  --proxy URL  --init systemd|openrc|nohup'
+    say '服务管理'
+    say "  $RT_NAME start                 启动服务"
+    say "  $RT_NAME stop                  停止服务"
+    say "  $RT_NAME restart               重启并检查服务是否正常"
+    say "  $RT_NAME enable                设置开机启动"
+    say "  $RT_NAME disable               取消开机启动"
     say ''
-    say '退出码: 0 成功 | 1 通用失败 | 2 用法错误 | 3 平台/架构不支持 | 4 下载失败 | 5 校验失败'
-    say '        6 权限不足 | 7 服务操作失败 | 8 配置冲突 | 9 健康检查失败(已回滚) | 10 doctor 未通过'
-    say '        11 功能未实现 | 12 拒绝在非终端输出敏感内容 | 75 锁被占用'
+    say '安装与配置'
+    say "  $RT_NAME install               安装或覆盖升级"
+    say "  $RT_NAME install --tls-generate 安装并启用 TLS 加密"
+    say "  $RT_NAME config show           查看配置（token 默认隐藏）"
+    say "  $RT_NAME config edit           编辑配置，之后执行 $RT_NAME restart"
+    say "  $RT_NAME proxy nginx           生成 nginx 反向代理配置"
+    say "  $RT_NAME uninstall             卸载，默认保留配置和 token"
     say ''
-    say "示例: $RT_NAME install --tls-generate        # 安装（自签 TLS + 随机端口）"
-    say "      $RT_NAME token show --reveal           # 查看完整 token（需交互终端）"
-    say "      $RT_NAME proxy nginx                   # 生成反向代理模板"
-    say "      $RT_NAME doctor                        # 自检"
+    say '其他'
+    say "  $RT_NAME version               查看版本"
+    say "  $RT_NAME help                  显示本帮助"
+    say ''
+    say '提示'
+    say '  系统级安装通常需要 sudo；用户级安装直接运行以上命令。'
+    say '  完整 token 仅复制给可信 Agent，不要发到群聊、工单或公开日志。'
     return 0
 }
 
@@ -3047,11 +3062,12 @@ init	cmd_init	mid	yes	生成 agent.conf 与 token（已存在则 exit 8）
 start	cmd_start	mid	yes	启动服务
 stop	cmd_stop	mid	yes	停止服务（不做 kill -9）
 restart	cmd_restart	mid	yes	重启服务并做健康检查
-status	cmd_status	low	no	只读状态汇总
+status	cmd_status	low	no	只读状态汇总（--all 显示完整 token）
 logs	cmd_logs	low	no	查看日志（--follow 跟随，默认过滤 token）
 enable	cmd_enable	mid	yes	开机自启
 disable	cmd_disable	mid	yes	关闭开机自启
 upgrade	cmd_upgrade	high	yes	停服务 -> 原子替换 -> 健康检查 -> 失败回滚
+update	cmd_upgrade	high	yes	升级（upgrade 的别名，支持 --check）
 uninstall	cmd_uninstall	high	yes	卸载（默认保留配置，--purge 才销毁）
 config	cmd_config	mid	yes	配置 show/get/set/edit（token 键一律拒绝）
 token	cmd_token	mid	yes	token show（默认 masked）/ reset（双探针）
@@ -3163,6 +3179,7 @@ parse_args() {
             --json) RT_JSON=1 ;;
             --quiet|-q) RT_QUIET=1 ;;
             --verbose|-v) RT_VERBOSE=1 ;;
+            --all) RT_ALL=1 ;;
             --purge) RT_PURGE=1 ;;
             --check) RT_CHECK=1 ;;
             --restart) RT_RESTART=1 ;;
@@ -3250,6 +3267,7 @@ rt_init_defaults() {
     RT_QUIET=0
     RT_JSON=0
     RT_VERBOSE=0
+    RT_ALL=0
     RT_YES=0
     RT_SCOPE=''
     RT_PREFIX=''
@@ -3349,7 +3367,10 @@ main() {
     resolve_scope
     scope_paths
     if [ -z "$RT_CMD" ]; then
-        RT_CMD='install'
+        case "${0##*/}" in
+            rt) RT_CMD='status' ;;
+            *) RT_CMD='install' ;;
+        esac
     fi
     if [ "$RT_SCOPE" = system ] && [ "$RT_EUID" = 0 ]; then
         priv mkdir -p "$RT_LOG_DIR" 2>/dev/null || true

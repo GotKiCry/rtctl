@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Linux 裸 `rt` 命令默认显示 `rt status`；`rt status --all` 可显式输出完整 token。
+- 新增 `rt update` 作为 `rt upgrade` 的别名，沿用健康检查和失败回滚流程。
+
+### Changed
+
+- 简化 `rt help`，按使用场景分组，移除风险等级、退出码和未实现命令等开发向信息。
+
 ## [1.0.1] - 2026-11-03
 
 ### Changed
