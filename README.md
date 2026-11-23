@@ -150,13 +150,13 @@ sudo rt uninstall              # 默认保留配置和 token
 已安装 v1.0.1 等旧版的设备，可通过测试版的管理脚本进入 dev 渠道：
 
 ```bash
-curl -fsSL https://github.com/GotKiCry/rtctl/releases/download/v1.0.2-dev.1/install.sh \
+curl -fsSL https://github.com/GotKiCry/rtctl/releases/download/v1.0.2-dev.2/install.sh \
   -o /tmp/rt-dev-install.sh
 sudo sh /tmp/rt-dev-install.sh upgrade --dev --check
-sudo sh /tmp/rt-dev-install.sh upgrade --dev
+sudo sh /tmp/rt-dev-install.sh upgrade --dev --wait
 ```
 
-全新安装使用 `sudo sh /tmp/rt-dev-install.sh install --dev`。用户级安装去掉 `sudo` 并加 `--scope user`。升级后可用 `rt version` 查看已安装版本。
+`--wait` 在当前终端显示升级过程和最终结果。全新安装使用 `sudo sh /tmp/rt-dev-install.sh install --dev`。用户级安装去掉 `sudo` 并加 `--scope user`。系统级安装完成后用 `sudo rt version --scope system` 确认版本。
 
 使用 `v1.0.0` 及后续版本时：
 

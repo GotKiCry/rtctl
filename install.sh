@@ -503,6 +503,9 @@ load_state() {
 
 state_require() {
     if ! load_state; then
+        if [ "$RT_SCOPE" = user ] && [ -d /etc/rtctl ]; then
+            die "$EX_CONFLICT" "未检测到用户级安装（缺少 $RT_STATE_FILE）。系统级安装请用 sudo 并指定 --scope system"
+        fi
         die "$EX_CONFLICT" "未检测到安装（缺少 $RT_STATE_FILE）：请先执行 $RT_NAME install"
     fi
 }
@@ -2167,11 +2170,24 @@ cmd_disable() {
 # upgrade：准备并校验 -> 备份 -> 停 -> 替换并验证 -> 失败时恢复并验证
 # ---------------------------------------------------------------------------
 detach_run() {
+    _rt_dr_sudo=''
+    _rt_dr_user=''
+    if [ "$RT_SCOPE" = system ]; then
+        _rt_dr_sudo='sudo '
+    else
+        _rt_dr_user='--user'
+    fi
     if [ "$RT_INIT" = systemd ] && have systemd-run; then
-        if systemd-run --unit="rt-upgrade-$$" --collect --quiet -- "$@" >/dev/null 2>&1; then
+        _rt_dr_unit="rt-upgrade-$$.service"
+        if systemd-run ${_rt_dr_user:+"$_rt_dr_user"} --unit="$_rt_dr_unit" --collect --quiet \
+            --property=StandardOutput=journal --property=StandardError=journal -- "$@" >/dev/null 2>&1; then
+            RT_UPGRADE_LOG_COMMAND="${_rt_dr_sudo}journalctl ${_rt_dr_user:+$_rt_dr_user }-u $_rt_dr_unit -f"
             return 0
         fi
     fi
+    mkdir -p "$RT_LOG_DIR" || return 1
+    ( : >>"$RT_LOG_FILE" ) || return 1
+    RT_UPGRADE_LOG_COMMAND="${_rt_dr_sudo}tail -f '$RT_LOG_FILE'"
     if have setsid; then
         setsid "$@" >>"$RT_LOG_FILE" 2>&1 </dev/null &
         return 0
@@ -2196,12 +2212,19 @@ cmd_upgrade() {
         return 0
     fi
     if [ "${RT_DETACHED:-0}" != 1 ] && [ -f "$0" ]; then
+        case "$0" in
+            /*) _rt_u_script=$0 ;;
+            *) _rt_u_script="$(pwd -P)/$0" ;;
+        esac
         set -- upgrade --detached --yes --release "$RT_TAG" --scope "$RT_SCOPE"
         if [ -n "$RT_BASE_URL" ]; then set -- "$@" --base-url "$RT_BASE_URL"; fi
         if [ -n "$RT_PROXY" ]; then set -- "$@" --proxy "$RT_PROXY"; fi
-        detach_run /bin/sh "$0" "$@" || die "$EX_SERVICE" "无法启动后台升级"
+        detach_run /bin/sh "$_rt_u_script" "$@" || die "$EX_SERVICE" "无法启动后台升级"
         ok "升级已在后台启动，当前会话可以安全退出"
-        say "查看进度：$RT_NAME logs    安装日志：tail -f $RT_LOG_FILE"
+        hint "升级日志：$RT_UPGRADE_LOG_COMMAND"
+        _rt_u_status="$RT_NAME version --scope $RT_SCOPE"
+        if [ "$RT_SCOPE" = system ]; then _rt_u_status="sudo $_rt_u_status"; fi
+        hint "完成后确认版本：$_rt_u_status"
         return 0
     fi
     lock_acquire
@@ -2214,6 +2237,7 @@ cmd_upgrade() {
         die "$EX_PLATFORM" "不支持的架构：$(uname -m)"
     fi
     RT_ARCH=$RT_ARCH_OUT
+    info "正在下载并校验 $RT_TAG"
     fetch_assets "$RT_TAG" "$RT_ARCH"
     _rt_u_newsha=$(sha256_of "$RT_DL_AGENT" || true)
     [ -n "$_rt_u_newsha" ] || die "$EX_CHECKSUM" '无法计算新 agent 的 SHA256，升级中止'
@@ -3056,6 +3080,7 @@ cmd_help() {
     say '  --no-firewall          跳过防火墙检查和提示'
     say '  --dev | --stable       安装或升级时选择 dev 测试版或稳定版'
     say '  --release TAG          安装或升级到指定版本'
+    say '  --wait                 升级时等待完成并直接显示结果'
     say '  --yes  --quiet  --verbose'
     say ''
     say "示例：$RT_NAME install --tls-generate"
@@ -3230,7 +3255,7 @@ parse_args() {
             --reveal) RT_REVEAL=1 ;;
             --force) RT_FORCE=1 ;;
             --temp) RT_TEMP=1 ;;
-            --detached) RT_DETACHED=1 ;;
+            --detached|--wait) RT_DETACHED=1 ;;
             --follow|-f) RT_FOLLOW=1 ;;
             --no-print-token) RT_NO_PRINT_TOKEN=1 ;;
             -h|--help) RT_CMD='help' ;;
