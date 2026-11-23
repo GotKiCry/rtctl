@@ -181,7 +181,11 @@ have() {
 # 交互：只从 fd 3（/dev/tty）读，绝不碰 stdin
 rt_open_tty() {
     RT_TTY=0
-    if [ -r /dev/tty ]; then
+    # 无控制终端（curl|sh、ssh 未加 -t、cron、CI）时，`exec 3</dev/tty` 的重定向错误
+    # 属致命错误：严格 POSIX sh（dash / bash --posix）会直接退出非交互 shell（零输出 exit 1），
+    # if 条件豁免也无法挽救。因此先用非特殊内建 true 探测——它的重定向失败只让该命令
+    # 失败、不退出 shell；探测通过后再 exec 持有 fd 3。
+    if [ -r /dev/tty ] && true 2>/dev/null 3</dev/tty; then
         # bash 重定向从左到右处理：`exec 3</dev/tty 2>/dev/null` 在打开失败时会
         # 先把错误写到 stderr（此时 2>/dev/null 尚未生效），必须整块抑制。
         if { exec 3</dev/tty; } 2>/dev/null; then
@@ -1443,8 +1447,8 @@ svc_restart() {
 
 svc_enable() {
     case "$RT_INIT" in
-        systemd) systemctl_do enable "$RT_SVC_NAME" >/dev/null 2>&1 ;;
-        openrc) rc-update add "$RT_SVC_NAME" default >/dev/null 2>&1 ;;
+        systemd) systemctl_do enable "$RT_SVC_NAME" >/dev/null 2>&1 && RT_AUTOSTART='systemd' ;;
+        openrc) rc-update add "$RT_SVC_NAME" default >/dev/null 2>&1 && RT_AUTOSTART='openrc' ;;
         nohup)
             if have crontab || [ -d /etc/cron.d ]; then
                 rt_tmpfile
@@ -1689,15 +1693,17 @@ health_check() {
     _rt_hc_url="$_rt_hc_scheme://$_rt_hc_host:$_rt_hc_port/healthz"
     _rt_hc_i=0
     while [ "$_rt_hc_i" -lt 10 ]; do
+        # 探活走本机地址，必须绕过 http_proxy/HTTP_PROXY：带代理的机器上
+        # curl/wget 会把 127.0.0.1 的请求发给代理，造成"agent 正常却健康检查失败"的误判（exit 9）。
         if have curl; then
-            if curl -fsS $_rt_hc_insecure --max-time 2 "$_rt_hc_url" >/dev/null 2>&1; then
+            if curl -fsS --noproxy '*' $_rt_hc_insecure --max-time 2 "$_rt_hc_url" >/dev/null 2>&1; then
                 return 0
             fi
         elif have wget; then
             if [ "$_rt_hc_scheme" = https ]; then
-                if wget -q --no-check-certificate -T 2 -O /dev/null "$_rt_hc_url" 2>/dev/null; then return 0; fi
+                if no_proxy='*' NO_PROXY='*' wget -q --no-check-certificate -T 2 -O /dev/null "$_rt_hc_url" 2>/dev/null; then return 0; fi
             else
-                if wget -q -T 2 -O /dev/null "$_rt_hc_url" 2>/dev/null; then return 0; fi
+                if no_proxy='*' NO_PROXY='*' wget -q -T 2 -O /dev/null "$_rt_hc_url" 2>/dev/null; then return 0; fi
             fi
         elif have nc; then
             if nc -z -w 2 "$_rt_hc_host" "$_rt_hc_port" >/dev/null 2>&1; then return 0; fi
@@ -1944,6 +1950,10 @@ cmd_install() {
         priv install -d -m 0755 -o root -g root "$RT_STATE_DIR" 2>/dev/null || true
     else
         mkdir -p "$RT_CONF_DIR" 2>/dev/null || true
+        # 幂等收紧：保留旧配置的升级安装走 agent_init_config 的 conf_exists 早退，
+        # 不会执行其 chmod 0700，目录会停留在 umask 默认（如 775）——token 文件名因此对
+        # 同机其他用户可见。此处无条件收紧到 700。
+        chmod 0700 "$RT_CONF_DIR" 2>/dev/null || true
         chmod 0700 "$RT_CONF_DIR" 2>/dev/null || true
     fi
 
@@ -2888,10 +2898,15 @@ cmd_doctor() {
         doctor_bad "agent 二进制缺失或不可执行：${RT_BIN_AGENT:-<未知>}"
     fi
     if [ -f "${RT_CONF:-/nonexistent}" ]; then
+        # 期望值按 scope：system=600 rtctl:rtctl；user=600 <运行用户>（conf_finish_perms 决定）
+        _rt_dc_want_conf='600 rtctl:rtctl'
+        if [ "$RT_SCOPE" = user ]; then
+            _rt_dc_want_conf="600 $RT_RUN_USER:$RT_RUN_GROUP"
+        fi
         _rt_dc_perm=$(priv stat -c '%a %U:%G' "$RT_CONF" 2>/dev/null || printf '?')
         case "$_rt_dc_perm" in
-            '600 rtctl:rtctl') doctor_ok "配置权限：$_rt_dc_perm" ;;
-            *) doctor_warn "配置权限异常：$_rt_dc_perm（期望 600 rtctl:rtctl）" ;;
+            "$_rt_dc_want_conf") doctor_ok "配置权限：$_rt_dc_perm" ;;
+            *) doctor_warn "配置权限异常：$_rt_dc_perm（期望 $_rt_dc_want_conf）" ;;
         esac
         _rt_dc_tok=$(token_value || true)
         if [ -n "$_rt_dc_tok" ]; then doctor_ok "token 可读（fingerprint=$(fingerprint_of "$_rt_dc_tok")）"; else doctor_warn "token 读不到（无权限？）"; fi
@@ -2899,10 +2914,17 @@ cmd_doctor() {
         doctor_bad "配置文件缺失：${RT_CONF:-<未知>}"
     fi
     if [ -d "${RT_CONF_DIR:-/nonexistent}" ]; then
+        # 期望值按 scope：system=750/710 root:rtctl；user=700 <运行用户>（目录含 token 文件名）
+        _rt_dc_want_dir='750 root:rtctl'
+        _rt_dc_want_dir2='710 root:rtctl'
+        if [ "$RT_SCOPE" = user ]; then
+            _rt_dc_want_dir="700 $RT_RUN_USER:$RT_RUN_GROUP"
+            _rt_dc_want_dir2=''
+        fi
         _rt_dc_dperm=$(priv stat -c '%a %U:%G' "$RT_CONF_DIR" 2>/dev/null || printf '?')
         case "$_rt_dc_dperm" in
-            '750 root:rtctl'|'710 root:rtctl') doctor_ok "配置目录权限：$_rt_dc_dperm" ;;
-            *) doctor_warn "配置目录权限异常：$_rt_dc_dperm（期望 750 root:rtctl）" ;;
+            "$_rt_dc_want_dir"|"$_rt_dc_want_dir2") doctor_ok "配置目录权限：$_rt_dc_dperm" ;;
+            *) doctor_warn "配置目录权限异常：$_rt_dc_dperm（期望 $_rt_dc_want_dir）" ;;
         esac
     fi
     if svc_active; then doctor_ok "服务 active（$RT_INIT）"; else doctor_bad "服务未运行（$RT_NAME start，排错 $RT_NAME logs）"; fi

@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 修复健康检查未绕过 `http_proxy`/`HTTP_PROXY`：带代理的机器上 curl/wget 会把 `127.0.0.1` 的探活请求发给代理，造成 agent 正常却安装失败（exit 9）；curl 加 `--noproxy '*'`，wget 加 `no_proxy`。
+- 修复 `rt_open_tty` 在严格 POSIX sh（dash、`bash --posix`）且无控制终端（`curl | sh`、ssh 未加 `-t`、cron、CI）时，`exec 3</dev/tty` 重定向错误直接杀死非交互 shell，脚本零输出退出；改用非特殊内建先探测再持有。
+- 修复 `rt enable` 在 systemd/openrc 下成功后仍误报"无法设置开机自启"：`svc_enable` 成功后未更新 `RT_AUTOSTART`，状态文件记录与实际不符。
+- 修复 `rt doctor` 权限检查不区分安装范围：用户级安装的 `600 <用户>:<组>` 被按系统级 `600 rtctl:rtctl` 误报；期望值现按 scope 生成。
+- 修复保留旧配置的升级安装不再收紧用户级配置目录权限（停留在 775 等 umask 默认值，token 文件名对同机其他用户可见）；`rt install` 现在无条件 `chmod 700`。
+
 ### Changed
 
 - `rtctl-agent -status` 默认显示当前设备 token，可通过 `-print-token=false` 隐藏，手工部署无需再直接读取配置文件。
