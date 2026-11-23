@@ -47,19 +47,19 @@ sh /tmp/rt-install.sh install --scope user
 
 ### 2. 获取连接信息
 
-安装完成后会显示地址、token 和客户端命令。之后可随时重新查看：
+安装完成后会显示地址、token 和客户端命令。用 `rt status` 查看完整 token，用 `rt connect` 重看连接命令。
 
 ```bash
 # 系统级安装
 sudo rt connect
-sudo rt token show --reveal
+sudo rt status
 
 # 用户级安装
 rt connect
-rt token show --reveal
+rt status
 ```
 
-请通过安全渠道保存和传递 token，不要将其提交到仓库或贴入公开日志。
+使用 `rt status --no-print-token` 获取可分享的状态输出。
 
 ### 3. 在控制机下载 client
 
@@ -114,7 +114,8 @@ rtctl -server ws://192.168.1.5:41234/ws file-get \
 ### Linux 服务管理
 
 ```bash
-sudo rt status                 # 服务、端口和版本
+sudo rt status                 # 服务、端口、版本和完整 token
+sudo rt token reset            # 轮换 token
 sudo rt logs -f                # 实时日志
 sudo rt restart                # 重启并检查健康状态
 sudo rt doctor                 # 安装与安全自检
@@ -123,7 +124,7 @@ sudo rt upgrade                # 升级，失败时尝试恢复并检查旧版�
 sudo rt uninstall              # 默认保留配置和 token
 ```
 
-用户级安装使用相同子命令，但不加 `sudo`。运行 `rt help` 查看全部管理命令。
+在终端输入 `rt` 进入互动菜单，可查看状态和日志、切换渠道、检查更新、升级或卸载。也可用 `rt menu --scope system|user` 明确选择安装范围。运行 `rt help` 查看命令列表，运行 `rt <命令> --help` 查看子命令和选项。
 
 ### 手工运行 agent
 
@@ -145,12 +146,14 @@ sudo rt uninstall              # 默认保留配置和 token
 
 ### 测试 dev 版本
 
-`--dev` 选择 GitHub 上版本号最高的 `vX.Y.Z-dev.N` 预发行版。已有 dev 版本运行 `rt upgrade` 时会继续检查 dev 渠道，`--stable` 可切回稳定版，`--release TAG` 可指定确切的版本。
+菜单中的「切换渠道」会保存选择，之后「检查更新」和「升级」都使用该渠道。命令行可用 `rt channel stable` 或 `rt channel dev` 设置，系统级安装使用 `sudo rt channel stable` 或 `sudo rt channel dev`。降级到早期版本时保留较新的管理脚本，方便在菜单内再次切换。
+
+`--dev` 和 `--stable` 可为单次安装或升级指定渠道，`--release TAG` 可指定确切版本。尚未保存渠道时，`rt upgrade` 沿用已安装版本的渠道。
 
 已安装 v1.0.1 等旧版的设备，可通过测试版的管理脚本进入 dev 渠道：
 
 ```bash
-curl -fsSL https://github.com/GotKiCry/rtctl/releases/download/v1.0.2-dev.2/install.sh \
+curl -fsSL https://github.com/GotKiCry/rtctl/releases/download/v1.0.2-dev.4/install.sh \
   -o /tmp/rt-dev-install.sh
 sudo sh /tmp/rt-dev-install.sh upgrade --dev --check
 sudo sh /tmp/rt-dev-install.sh upgrade --dev --wait

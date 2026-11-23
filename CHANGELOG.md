@@ -6,6 +6,7 @@
 
 ### Added
 
+- 终端中输入 `rt` 打开互动菜单，支持保存 stable/dev 渠道、检查更新、前台升级和确认卸载。
 - 安装和升级支持 `--dev` 选择 GitHub 预发行版，`--stable` 切回稳定渠道，`--release TAG` 可固定测试版本。
 
 ### Fixed
@@ -22,6 +23,8 @@
 
 ### Changed
 
+- `rt <命令> --help` 和 `rt help <命令>` 列出对应的子命令和选项。
+- `rt status` 默认显示完整 token，可用 `--no-print-token` 隐藏。`rt token` 只保留 `reset` 子命令。
 - 安装、连接引导和自检提供只读防火墙检查与手工配置提示。安装器、agent 和卸载器均不修改系统的防火墙规则。
 
 - `rtctl-agent -status` 默认显示当前设备 token，可通过 `-print-token=false` 隐藏，手工部署无需再直接读取配置文件。

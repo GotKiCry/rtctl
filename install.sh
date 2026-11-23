@@ -17,7 +17,7 @@
 #      探测性管道一律 || true。
 #   2. 交互只从 fd 3（/dev/tty）读；curl | sh 时 stdin 是脚本本体，
 #      绝不从 stdin 读一个字节（无 tty 时全部走默认值）。
-#   3. 单文件 + 注册表（name<TAB>handler<TAB>risk<TAB>needs_root<TAB>desc）
+#   3. 单文件 + 命令注册表（name<TAB>handler）
 #      驱动分发；未实现子命令统一 exit 11，未知子命令 exit 2。
 #   4. 不读任何环境变量作为输入；固定 PATH；umask 077；外部命令先 command -v。
 #   5. 原子替换：目标同目录 mktemp -> chmod/chown -> mv -f；SELinux 下 restorecon -F。
@@ -934,6 +934,26 @@ is_dev_release() {
     printf '%s\n' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$'
 }
 
+stored_release_channel() {
+    [ -n "$RT_STATE_DIR" ] && [ -f "$RT_STATE_DIR/release-channel" ] \
+        && [ -r "$RT_STATE_DIR/release-channel" ] || return 1
+    IFS= read -r _rt_src_channel <"$RT_STATE_DIR/release-channel" || return 1
+    case "$_rt_src_channel" in
+        stable|dev) printf '%s\n' "$_rt_src_channel" ;;
+        *) return 1 ;;
+    esac
+}
+
+upgrade_channel() {
+    if ! stored_release_channel; then
+        if is_dev_release "${1:-$RT_AGENT_VERSION}"; then
+            printf '%s\n' dev
+        else
+            printf '%s\n' stable
+        fi
+    fi
+}
+
 resolve_dev_release() {
     rt_tmpfile
     _rt_rd_file=$RT_TMPFILE
@@ -965,9 +985,15 @@ resolve_release_tag() {
         RT_TAG_OUT=$RT_RELEASE
         return 0
     fi
-    if [ "$RT_RELEASE_CHANNEL" = dev ] || {
-        [ -z "$RT_RELEASE_CHANNEL" ] && [ "$RT_CMD" = upgrade ] && is_dev_release "$RT_AGENT_VERSION"
-    }; then
+    _rt_rrt_channel=$RT_RELEASE_CHANNEL
+    if [ -z "$_rt_rrt_channel" ]; then
+        if [ "$RT_CMD" = upgrade ]; then
+            _rt_rrt_channel=$(upgrade_channel)
+        else
+            _rt_rrt_channel=$(stored_release_channel || true)
+        fi
+    fi
+    if [ "$_rt_rrt_channel" = dev ]; then
         resolve_dev_release
         return 0
     fi
@@ -1701,7 +1727,7 @@ print_guidance() {
     _rt_pg_enabled='否'
     if svc_enabled; then _rt_pg_enabled='是'; fi
     _rt_pg_rt=$RT_NAME
-    if [ "$RT_SCOPE" = system ] && [ "$RT_EUID" != 0 ]; then _rt_pg_rt="sudo $RT_NAME"; fi
+    if [ "$RT_SCOPE" = system ]; then _rt_pg_rt="sudo $RT_NAME"; fi
     _rt_pg_token=$(token_value 2>/dev/null || true)
     hr
     info '连接信息'
@@ -1715,9 +1741,9 @@ print_guidance() {
             say "token : $(mask_token "$_rt_pg_token")"
         fi
         warn 'token 是远程控制凭据，请勿泄露'
-        hint "再次查看：$_rt_pg_rt token show --reveal（需交互终端）"
+        hint "查看完整 token：$_rt_pg_rt status"
     else
-        hint "查看 token：$_rt_pg_rt token show --reveal（需交互终端）"
+        hint "查看 token：$_rt_pg_rt status"
     fi
     say ''
     if listen_is_loopback "$_rt_pg_listen"; then
@@ -1771,7 +1797,7 @@ print_guidance() {
 }
 
 # ---------------------------------------------------------------------------
-# token 读取（只有一条完整取值路径：token show --reveal）
+# token 读取
 # ---------------------------------------------------------------------------
 token_value() {
     [ -f "$RT_CONF" ] || return 1
@@ -1904,7 +1930,9 @@ cmd_install() {
         detail "沿用既有客户端：$RT_BIN_CLIENT"
     fi
     _rt_i_selfsrc=$(self_script_source || true)
-    if [ -n "$_rt_i_selfsrc" ]; then
+    if manager_is_newer "$RT_TAG"; then
+        info '保留较新的管理脚本'
+    elif [ -n "$_rt_i_selfsrc" ]; then
         install_one_binary "$_rt_i_selfsrc" "$RT_BIN_DIR/$RT_NAME" "$_rt_i_owner"
         detail "管理命令已安装：$RT_BIN_DIR/$RT_NAME"
     else
@@ -2121,6 +2149,12 @@ cmd_status() {
         say "配置目录   : $(priv stat -c '%a %U:%G' "$RT_CONF_DIR" 2>/dev/null || printf '?')"
     fi
     say "TLS        : ${RT_TLS_ENABLED:-unknown}"
+    if [ "$RT_NO_PRINT_TOKEN" = 1 ]; then
+        say 'token      : <已隐藏>'
+    else
+        _rt_cs_token=$(token_value 2>/dev/null || true)
+        say "token      : ${_rt_cs_token:-<不可读取>}"
+    fi
     say "token 指纹 : ${RT_TOKEN_FP:-unknown}"
     say "安装时间   : ${RT_INSTALLED_AT:-unknown}"
     if [ -n "${RT_PORT_STATE:-}" ]; then
@@ -2180,6 +2214,26 @@ cmd_disable() {
 # ---------------------------------------------------------------------------
 # upgrade：准备并校验 -> 备份 -> 停 -> 替换并验证 -> 失败时恢复并验证
 # ---------------------------------------------------------------------------
+manager_is_newer() {
+    [ -f "$RT_BIN_DIR/$RT_NAME" ] || return 1
+    _rt_min_version=$(sed -n "s/^RT_VERSION='\([^']*\)'$/\1/p" "$RT_BIN_DIR/$RT_NAME" | head -n1)
+    awk -v manager="$_rt_min_version" -v target="$1" '
+        BEGIN {
+            if (manager !~ /^v[0-9]+\.[0-9]+\.[0-9]+($|-)/) exit 1
+            split(substr(manager, 2), current, /[.-]/)
+            split(substr(target, 2), next_version, /[.-]/)
+            for (i = 1; i <= 3; i++) {
+                if (current[i] + 0 != next_version[i] + 0)
+                    exit !(current[i] + 0 > next_version[i] + 0)
+            }
+            if (current[4] == "" && next_version[4] != "") exit 0
+            if (current[4] == "dev" && next_version[4] == "dev")
+                exit !(current[5] + 0 > next_version[5] + 0)
+            exit 1
+        }
+    '
+}
+
 detach_run() {
     _rt_dr_sudo=''
     _rt_dr_user=''
@@ -2284,7 +2338,9 @@ cmd_upgrade() {
         fi
         _rt_u_selfsrc=$RT_DL_SCRIPT
         if [ -z "$_rt_u_selfsrc" ]; then _rt_u_selfsrc=$(self_script_source || true); fi
-        if [ -n "$_rt_u_selfsrc" ]; then
+        if manager_is_newer "$RT_TAG"; then
+            info '保留较新的管理脚本，仍可管理 dev 和 stable 渠道'
+        elif [ -n "$_rt_u_selfsrc" ]; then
             atomic_put "$_rt_u_selfsrc" "$RT_BIN_DIR/$RT_NAME" 0755 "$_rt_u_owner" || warn '管理命令更新失败'
         fi
         RT_UPGRADED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '')
@@ -2354,6 +2410,7 @@ cmd_uninstall() {
             return 0
         fi
     fi
+    lock_acquire
     say '[1/6] 停止服务'
     svc_stop || warn "停止服务未成功，继续卸载"
     if svc_active; then
@@ -2451,7 +2508,7 @@ cmd_config() {
             done
             say "配置文件   = $RT_CONF"
             hr
-            hint "改配置：$RT_NAME config set <key> <value> [--restart]；完整 token 只有一条路径：$RT_NAME token show --reveal"
+            hint "改配置：$RT_NAME config set <key> <value> [--restart]；查看完整 token：$RT_NAME status"
             ;;
         get)
             _rt_cf_key=${RT_REST%% *}
@@ -2460,7 +2517,7 @@ cmd_config() {
             config_key_allowed "$_rt_cf_key" || _rt_cf_rc=$?
             case "$_rt_cf_rc" in
                 0) : ;;
-                2) die "$EX_NOSECRET" "config get token 被拒绝：完整 token 只有一条取值路径 —— $RT_NAME token show --reveal" ;;
+                2) die "$EX_NOSECRET" "查看完整 token 请执行 $RT_NAME status" ;;
                 *) die "$EX_USAGE" "未知配置键：$_rt_cf_key（支持 listen/id/tls_cert/tls_key/allow_sudo/ws_path）" ;;
             esac
             conf_read_key "$_rt_cf_key"
@@ -2595,92 +2652,66 @@ probe_token_ok() {
 }
 
 cmd_token() {
-    _rt_tk_sub=${RT_SUB:-show}
+    case "$RT_SUB" in
+        '') cmd_help token; return ;;
+        reset) : ;;
+        *) die "$EX_USAGE" "查看完整 token 请执行 $RT_NAME status。轮换 token 请执行 $RT_NAME token reset" ;;
+    esac
     state_require
     _rt_tk_rt=$RT_NAME
-    if [ "$RT_SCOPE" = system ] && [ "$RT_EUID" != 0 ]; then _rt_tk_rt="sudo $RT_NAME"; fi
-    case "$_rt_tk_sub" in
-        show)
-            _rt_tk=$(token_value || true)
-            if [ -z "$_rt_tk" ]; then
-                die "$EX_CONFLICT" "无法读取 token，请检查配置和权限：$_rt_tk_rt token show --reveal"
-            fi
-            if [ "$RT_REVEAL" = 1 ]; then
-                if [ ! -t 1 ] && [ "$RT_FORCE" != 1 ]; then
-                    die "$EX_NOSECRET" "非交互输出默认隐藏完整 token；确认不会写入日志后，可使用 --force"
-                fi
-                if [ "$RT_FORCE" = 1 ]; then
-                    warn "完整 token 将输出，请勿写入文件、日志或 CI"
-                fi
-                say "token = $_rt_tk"
-                say "指纹 = $(fingerprint_of "$_rt_tk")"
-                warn "token 可用于远程执行命令和传输文件，请勿泄露"
-            else
-                say "token = $(mask_token "$_rt_tk")"
-                say "指纹 = $(fingerprint_of "$_rt_tk")"
-                say "长度 = ${#_rt_tk}"
-                say "来源 = $RT_CONF"
-                hint "查看完整 token：$_rt_tk_rt token show --reveal（需交互终端）"
-            fi
-            ;;
-        reset)
-            [ "$RT_SCOPE" = system ] && require_root_or_die
-            [ -f "$RT_CONF" ] || die "$EX_CONFLICT" "配置文件不存在：$RT_CONF"
-            if [ "$RT_YES" != 1 ]; then
-                warn "轮换会重启 agent 并断开全部现有会话；旧 token 在重启完成前一直有效"
-                if ! ask_yn '确认轮换 token？' 'n'; then say '已取消'; return 0; fi
-            fi
-            _rt_tr_bak="$RT_CONF.bak-$(date +%Y%m%dT%H%M%S 2>/dev/null || printf '%s' "$$")"
-            priv cp -p "$RT_CONF" "$_rt_tr_bak" || die "$EX_FAIL" "备份配置失败"
-            priv chmod 0600 "$_rt_tr_bak" || true
-            if [ "$RT_SCOPE" = system ]; then priv chown "$RT_RUN_USER:$RT_RUN_GROUP" "$_rt_tr_bak" || true; fi
-            _rt_tr_old=$(token_value || true)
-            _rt_tr_new=''
-            if have openssl; then
-                _rt_tr_new=$(openssl rand -hex 32 2>/dev/null || true)
-            fi
-            if [ -z "$_rt_tr_new" ] && [ -r /dev/urandom ] && have od; then
-                _rt_tr_new=$(od -An -tx1 -N32 </dev/urandom 2>/dev/null | tr -d ' \n' || true)
-            fi
-            if [ -z "$_rt_tr_new" ]; then
-                die "$EX_FAIL" "无法生成新 token，请检查 openssl 和 /dev/urandom"
-            fi
-            conf_set_key token "$_rt_tr_new"
-            if ! svc_restart; then
-                warn "重启失败，正在恢复原 token"
-                priv cp -p "$_rt_tr_bak" "$RT_CONF" || true
-                conf_finish_perms "$RT_CONF"
-                svc_restart >/dev/null 2>&1 || true
-                die "$EX_SERVICE" "token 轮换失败，已恢复原 token"
-            fi
-            _rt_tr_newtok=$(token_value || true)
-            if probe_token_ok "$_rt_tr_newtok"; then
-                ok "新 token 验证通过"
-            else
-                _rt_tr_prc=$?
-                case "$_rt_tr_prc" in
-                    2) warn "缺少本机客户端，未自动验证新 token，请在控制机验证" ;;
-                    3) warn "使用自签 TLS 时无法自动验证新 token，请在控制机验证" ;;
-                    *) warn "新 token 自动验证失败，请在控制机确认连接" ;;
-                esac
-            fi
-            if [ -n "$_rt_tr_old" ] && probe_token_ok "$_rt_tr_old"; then
-                warn "旧 token 仍然可用，请确认 agent 已重启"
-            fi
-            say "新 token = $(mask_token "$_rt_tr_newtok")  指纹=$(fingerprint_of "$_rt_tr_newtok")"
-            hint "查看完整 token：$_rt_tk_rt token show --reveal"
-            hint "备份包含旧 token：$_rt_tr_bak"
-            if [ "$RT_SCOPE" = system ]; then
-                hint "删除备份：sudo shred -u $_rt_tr_bak"
-            else
-                hint "删除备份：shred -u $_rt_tr_bak"
-            fi
-            log_line 'action=token.reset result=ok'
-            ;;
-        *)
-            die "$EX_USAGE" "用法：$RT_NAME token show [--reveal] [--force] | $RT_NAME token reset [--yes]"
-            ;;
-    esac
+    if [ "$RT_SCOPE" = system ]; then _rt_tk_rt="sudo $RT_NAME"; fi
+    [ "$RT_SCOPE" = system ] && require_root_or_die
+    [ -f "$RT_CONF" ] || die "$EX_CONFLICT" "配置文件不存在：$RT_CONF"
+    if [ "$RT_YES" != 1 ]; then
+        warn "轮换会重启 agent 并断开全部现有会话；旧 token 在重启完成前一直有效"
+        if ! ask_yn '确认轮换 token？' 'n'; then say '已取消'; return 0; fi
+    fi
+    _rt_tr_bak="$RT_CONF.bak-$(date +%Y%m%dT%H%M%S 2>/dev/null || printf '%s' "$$")"
+    priv cp -p "$RT_CONF" "$_rt_tr_bak" || die "$EX_FAIL" "备份配置失败"
+    priv chmod 0600 "$_rt_tr_bak" || true
+    if [ "$RT_SCOPE" = system ]; then priv chown "$RT_RUN_USER:$RT_RUN_GROUP" "$_rt_tr_bak" || true; fi
+    _rt_tr_old=$(token_value || true)
+    _rt_tr_new=''
+    if have openssl; then
+        _rt_tr_new=$(openssl rand -hex 32 2>/dev/null || true)
+    fi
+    if [ -z "$_rt_tr_new" ] && [ -r /dev/urandom ] && have od; then
+        _rt_tr_new=$(od -An -tx1 -N32 </dev/urandom 2>/dev/null | tr -d ' \n' || true)
+    fi
+    if [ -z "$_rt_tr_new" ]; then
+        die "$EX_FAIL" "无法生成新 token，请检查 openssl 和 /dev/urandom"
+    fi
+    conf_set_key token "$_rt_tr_new"
+    if ! svc_restart; then
+        warn "重启失败，正在恢复原 token"
+        priv cp -p "$_rt_tr_bak" "$RT_CONF" || true
+        conf_finish_perms "$RT_CONF"
+        svc_restart >/dev/null 2>&1 || true
+        die "$EX_SERVICE" "token 轮换失败，已恢复原 token"
+    fi
+    _rt_tr_newtok=$(token_value || true)
+    if probe_token_ok "$_rt_tr_newtok"; then
+        ok "新 token 验证通过"
+    else
+        _rt_tr_prc=$?
+        case "$_rt_tr_prc" in
+            2) warn "缺少本机客户端，未自动验证新 token，请在控制机验证" ;;
+            3) warn "使用自签 TLS 时无法自动验证新 token，请在控制机验证" ;;
+            *) warn "新 token 自动验证失败，请在控制机确认连接" ;;
+        esac
+    fi
+    if [ -n "$_rt_tr_old" ] && probe_token_ok "$_rt_tr_old"; then
+        warn "旧 token 仍然可用，请确认 agent 已重启"
+    fi
+    say "新 token = $(mask_token "$_rt_tr_newtok")  指纹=$(fingerprint_of "$_rt_tr_newtok")"
+    hint "查看完整 token：$_rt_tk_rt status"
+    hint "备份包含旧 token：$_rt_tr_bak"
+    if [ "$RT_SCOPE" = system ]; then
+        hint "删除备份：sudo shred -u $_rt_tr_bak"
+    else
+        hint "删除备份：shred -u $_rt_tr_bak"
+    fi
+    log_line 'action=token.reset result=ok'
     return 0
 }
 
@@ -3061,14 +3092,219 @@ cmd_version() {
     return 0
 }
 
+cmd_channel() {
+    case "${RT_SUB:-show}" in
+        show)
+            say "当前渠道：$(upgrade_channel "$(state_get AGENT_VERSION)")"
+            ;;
+        stable|dev)
+            [ "$RT_SCOPE" != system ] || require_root_or_die
+            rt_tmpfile
+            _rt_ch_file=$RT_TMPFILE
+            printf '%s\n' "$RT_SUB" >"$_rt_ch_file"
+            if ! atomic_put "$_rt_ch_file" "$RT_STATE_DIR/release-channel" 0644; then
+                rm -f "$_rt_ch_file"
+                die "$EX_FAIL" '无法保存渠道设置'
+            fi
+            rm -f "$_rt_ch_file"
+            ok "已切换到 $RT_SUB 渠道"
+            ;;
+        *) die "$EX_USAGE" "用法：$RT_NAME channel [show|stable|dev]" ;;
+    esac
+}
+
+menu_run() (
+    set -- "$@" --scope "$RT_SCOPE"
+    if [ -n "$RT_PREFIX" ]; then set -- "$@" --prefix "$RT_PREFIX"; fi
+    if [ "$RT_SCOPE" = system ]; then
+        as_root /bin/sh "$RT_MENU_SCRIPT" "$@"
+    else
+        /bin/sh "$RT_MENU_SCRIPT" "$@"
+    fi
+)
+
+cmd_menu() {
+    if [ "$RT_TTY" != 1 ] || [ ! -t 0 ] || [ ! -t 1 ] || [ "$RT_QUIET" = 1 ]; then
+        cmd_help
+        return
+    fi
+    case "$0" in
+        /*) RT_MENU_SCRIPT=$0 ;;
+        *) RT_MENU_SCRIPT="$(pwd -P)/$0" ;;
+    esac
+
+    while :; do
+        if ! _rt_menu_channel=$(stored_release_channel); then
+            if [ "$RT_SCOPE" = system ] && [ "$RT_EUID" != 0 ] && [ ! -r "$RT_CONF_DIR" ]; then
+                _rt_menu_channel='自动'
+            else
+                _rt_menu_channel=$(upgrade_channel "$(state_get AGENT_VERSION)")
+            fi
+        fi
+        say ''
+        info "rtctl $RT_VERSION  |  $RT_SCOPE  |  渠道 $_rt_menu_channel"
+        say '  1  状态'
+        say '  2  连接信息'
+        say '  3  日志'
+        say '  4  切换渠道'
+        say '  5  检查更新'
+        say '  6  升级到所选渠道'
+        say '  7  卸载'
+        say '  0  退出'
+        printf '请选择：' >&2
+        IFS= read -r _rt_menu_choice <&3 || return 0
+        case "$_rt_menu_choice" in
+            1) set -- status ;;
+            2) set -- connect --no-print-token ;;
+            3) set -- logs ;;
+            4)
+                say '  1  stable'
+                say '  2  dev'
+                say '  0  返回'
+                printf '选择渠道：' >&2
+                IFS= read -r _rt_menu_channel_choice <&3 || return 0
+                case "$_rt_menu_channel_choice" in
+                    1|stable) set -- channel stable ;;
+                    2|dev) set -- channel dev ;;
+                    0|'') continue ;;
+                    *) err '请输入 1、2 或 0'; continue ;;
+                esac
+                ;;
+            5) set -- upgrade --check ;;
+            6) set -- upgrade --wait ;;
+            7) set -- uninstall ;;
+            0|q|exit) return 0 ;;
+            '') continue ;;
+            *) err '请输入 0 到 7'; continue ;;
+        esac
+        if menu_run "$@"; then
+            if [ "$1" = uninstall ] && [ ! -f "$RT_MENU_SCRIPT" ]; then return 0; fi
+        else
+            _rt_menu_rc=$?
+            err "$RT_NAME $1 退出码：$_rt_menu_rc"
+        fi
+    done
+}
+
 cmd_help() {
+    case "${1:-}" in
+        '') : ;;
+        install)
+            say "用法  $RT_NAME install [选项]"
+            say '  --scope system|user  --prefix DIR  --init systemd|openrc|nohup'
+            say '  --port N  --listen ADDR  --id NAME  --ws-path PATH'
+            say '  --tls-generate 或 --tls-cert FILE --tls-key FILE'
+            say '  --dev | --stable | --release TAG'
+            say '  --agent-src FILE  --base-url URL  --proxy URL  --pinned-sha256 HEX'
+            say '  --no-print-token  --no-firewall  --allow-from CIDR  --proxy-domain DOMAIN'
+            say '  --allow-sudo  --sudo ask|nopasswd  --verbose'
+            return
+            ;;
+        upgrade)
+            say "用法  $RT_NAME upgrade [选项]"
+            say '  --dev | --stable | --release TAG'
+            say '  --check  只检查版本'
+            say '  --wait   在当前终端等待升级结束'
+            say '  --scope system|user  --base-url URL  --proxy URL  --verbose'
+            return
+            ;;
+        init)
+            say "用法  $RT_NAME init [选项]"
+            say '  生成 agent 配置和 token'
+            say '  --scope system|user  --prefix DIR  --port N  --listen ADDR  --id NAME'
+            say '  --ws-path PATH  --tls-cert FILE  --tls-key FILE  --allow-sudo'
+            return
+            ;;
+        status)
+            say "用法  $RT_NAME status [--scope system|user] [--no-print-token] [--verbose]"
+            say '  查看服务状态、端口、版本和完整 token'
+            say '  --no-print-token  隐藏完整 token'
+            return
+            ;;
+        logs)
+            say "用法  $RT_NAME logs [--scope system|user] [-f|--follow]"
+            say '  查看 agent 日志，-f 持续跟随'
+            return
+            ;;
+        connect|doctor)
+            say "用法  $RT_NAME $1 [--scope system|user] [--no-firewall] [--allow-from CIDR] [--verbose]"
+            if [ "$1" = connect ]; then
+                say '  --no-print-token  隐藏完整 token'
+            fi
+            return
+            ;;
+        uninstall)
+            say "用法  $RT_NAME uninstall [--scope system|user] [--yes] [--purge]"
+            say '  --purge  同时删除配置和 token'
+            return
+            ;;
+        start|stop|restart|enable|disable)
+            say "用法  $RT_NAME $1 [--scope system|user]"
+            return
+            ;;
+        config)
+            say "用法  $RT_NAME config [子命令] [--scope system|user]"
+            say '  show                          查看配置（默认）'
+            say '  get <key>                     读取配置项'
+            say '  set <key> <value> [--restart]   修改配置项'
+            say '  edit [--editor CMD] [--restart] 编辑配置文件'
+            return
+            ;;
+        token)
+            say "用法  $RT_NAME token <子命令>"
+            say '  reset [--yes] [--scope system|user]  轮换 token'
+            say "查看完整 token 请执行 $RT_NAME status"
+            return
+            ;;
+        sudo)
+            say "用法  $RT_NAME sudo [子命令] [--scope system|user]"
+            say '  status                 查看远程 sudo 状态（默认）'
+            say '  temp                   开启临时授权'
+            say '  enable [--yes|--temp]   开启永久授权，--temp 改用临时授权'
+            say '  disable                关闭远程 sudo'
+            return
+            ;;
+        proxy)
+            say "用法  $RT_NAME proxy [子命令] [--proxy-domain DOMAIN] [--scope system|user]"
+            say '  nginx   生成 Nginx 配置（默认）'
+            say '  caddy   生成 Caddy 配置'
+            return
+            ;;
+        version)
+            say "用法  $RT_NAME version [--scope system|user] [--json]"
+            return
+            ;;
+        menu)
+            say "用法  $RT_NAME menu [--scope system|user]"
+            say '  状态、连接信息、日志、渠道切换、检查更新、升级、卸载'
+            return
+            ;;
+        channel)
+            say "用法  $RT_NAME channel [子命令] [--scope system|user]"
+            say '  show     查看当前渠道（默认）'
+            say '  stable   选择稳定版渠道'
+            say '  dev      选择测试版渠道'
+            return
+            ;;
+        help)
+            say "用法  $RT_NAME help [命令] [--verbose]"
+            return
+            ;;
+        harden|backup|restore|migrate)
+            say "$RT_NAME $1 尚未实现"
+            return
+            ;;
+        *) die "$EX_USAGE" "未知命令：$1，请运行 $RT_NAME help" ;;
+    esac
+
     say "rtctl $RT_VERSION —— Linux 安装与管理（命令：$RT_NAME）"
     say ''
     say "用法：$RT_NAME <命令> [子命令] [选项]"
     say ''
     say '常用命令：'
+    say '  menu          打开互动菜单'
     say '  install       安装或覆盖升级，保留既有配置和 token'
-    say '  status        查看服务、端口和版本'
+    say '  status        查看服务、端口、版本和完整 token'
     say '  connect       查看连接信息和客户端命令'
     say '  logs          查看日志，-f 持续跟随'
     say '  doctor        检查安装与安全配置'
@@ -3077,11 +3313,12 @@ cmd_help() {
     say '  start | stop | restart    启动、停止或重启服务'
     say '  enable | disable          启用或关闭开机自启'
     say '  upgrade                   升级，失败时回滚'
+    say '  channel show | stable | dev   查看或切换升级渠道'
     say '  uninstall                 卸载；--purge 同时删除配置和 token'
     say ''
     say '配置与安全：'
     say '  config show | get | set | edit    查看或修改配置'
-    say '  token show [--reveal] | reset     查看或轮换 token'
+    say '  token reset                       轮换 token'
     say '  sudo status | temp | enable | disable    管理远程 sudo'
     say '  proxy nginx | caddy               生成反向代理配置'
     say '  init                              仅生成配置和 token'
@@ -3090,7 +3327,7 @@ cmd_help() {
     say '常用选项：'
     say '  --scope system|user    系统级或用户级安装'
     say '  --tls-generate         生成自签 CA 和服务器证书'
-    say '  --no-print-token       安装完成时不显示完整 token'
+    say '  --no-print-token       隐藏完整 token'
     say '  --no-firewall          跳过防火墙检查和提示'
     say '  --dev | --stable       安装或升级时选择 dev 测试版或稳定版'
     say '  --release TAG          安装或升级到指定版本'
@@ -3099,8 +3336,10 @@ cmd_help() {
     say ''
     say "示例：$RT_NAME install --tls-generate"
     say "      $RT_NAME upgrade --dev --check"
-    say "      $RT_NAME token show --reveal"
+    say "      $RT_NAME status"
     say "      $RT_NAME sudo status"
+    say ''
+    say "命令帮助  $RT_NAME <命令> --help 或 $RT_NAME help <命令>"
     if [ "$RT_VERBOSE" != 1 ]; then
         say ''
         say "完整选项和退出码：$RT_NAME help --verbose"
@@ -3131,33 +3370,35 @@ cmd_not_implemented() {
 }
 
 # ---------------------------------------------------------------------------
-# 注册表：name<TAB>handler<TAB>risk<TAB>needs_root<TAB>desc
+# 命令注册表：name<TAB>handler
 # ---------------------------------------------------------------------------
 rt_cmd_table() {
     cat <<'RTCTL_CMD_TABLE'
-install	cmd_install	high	yes	下载安装、启动服务并检查本机健康状态
-init	cmd_init	mid	yes	生成 agent.conf 与 token（已存在则 exit 8）
-start	cmd_start	mid	yes	启动服务
-stop	cmd_stop	mid	yes	停止服务（不做 kill -9）
-restart	cmd_restart	mid	yes	重启服务并做健康检查
-status	cmd_status	low	no	只读状态汇总
-logs	cmd_logs	low	no	查看日志（--follow 跟随，默认过滤 token）
-enable	cmd_enable	mid	yes	开机自启
-disable	cmd_disable	mid	yes	关闭开机自启
-upgrade	cmd_upgrade	high	yes	下载校验后替换服务，失败时验证回滚结果
-uninstall	cmd_uninstall	high	yes	卸载（默认保留配置，--purge 才销毁）
-config	cmd_config	mid	yes	配置 show/get/set/edit（token 键一律拒绝）
-token	cmd_token	mid	yes	查看或轮换 token
-sudo	cmd_sudo	high	yes	提权授权 enable/temp/disable/status
-proxy	cmd_proxy	low	no	反向代理与路径前缀模板 nginx/caddy
-doctor	cmd_doctor	low	no	只读自检（有 fail -> exit 10）
-connect	cmd_connect	low	no	重放安装引导与连接示例
-version	cmd_version	low	no	版本与状态
-help	cmd_help	low	no	命令列表与退出码
-harden	cmd_not_implemented	mid	no	可选 systemd 加固 drop-in（未实现）
-backup	cmd_not_implemented	mid	no	备份配置与状态（未实现）
-restore	cmd_not_implemented	mid	no	从备份恢复（未实现）
-migrate	cmd_not_implemented	mid	no	迁移到新端口/新机器（未实现）
+install	cmd_install
+init	cmd_init
+start	cmd_start
+stop	cmd_stop
+restart	cmd_restart
+status	cmd_status
+logs	cmd_logs
+enable	cmd_enable
+disable	cmd_disable
+upgrade	cmd_upgrade
+uninstall	cmd_uninstall
+config	cmd_config
+token	cmd_token
+sudo	cmd_sudo
+proxy	cmd_proxy
+doctor	cmd_doctor
+connect	cmd_connect
+version	cmd_version
+menu	cmd_menu
+channel	cmd_channel
+help	cmd_help
+harden	cmd_not_implemented
+backup	cmd_not_implemented
+restore	cmd_not_implemented
+migrate	cmd_not_implemented
 RTCTL_CMD_TABLE
 }
 
@@ -3165,7 +3406,7 @@ rt_dispatch() {
     _rt_dp_cmd=$1
     shift || true
     _rt_dp_handler=''
-    while IFS="$RT_TAB" read -r _rt_dp_name _rt_dp_h _rt_dp_risk _rt_dp_root _rt_dp_desc; do
+    while IFS="$RT_TAB" read -r _rt_dp_name _rt_dp_h; do
         [ -n "$_rt_dp_name" ] || continue
         if [ "$_rt_dp_name" = "$_rt_dp_cmd" ]; then
             _rt_dp_handler=$_rt_dp_h
@@ -3266,13 +3507,11 @@ parse_args() {
             --purge) RT_PURGE=1 ;;
             --check) RT_CHECK=1 ;;
             --restart) RT_RESTART=1 ;;
-            --reveal) RT_REVEAL=1 ;;
-            --force) RT_FORCE=1 ;;
             --temp) RT_TEMP=1 ;;
             --detached|--wait) RT_DETACHED=1 ;;
             --follow|-f) RT_FOLLOW=1 ;;
             --no-print-token) RT_NO_PRINT_TOKEN=1 ;;
-            -h|--help) RT_CMD='help' ;;
+            -h|--help) RT_HELP=1 ;;
             -V|--version) RT_CMD='version' ;;
             --) : ;;
             -*) die "$EX_USAGE" "未知选项：$_rt_pa_arg" ;;
@@ -3369,8 +3608,7 @@ rt_init_defaults() {
     RT_PINNED=''
     RT_NO_FIREWALL=0
     RT_ALLOW_FROM=''
-    RT_FORCE=0
-    RT_REVEAL=0
+    RT_HELP=0
     RT_PURGE=0
     RT_CHECK=0
     RT_RESTART=0
@@ -3443,8 +3681,23 @@ rt_init_defaults() {
 
 main() {
     rt_init_defaults
-    rt_open_tty
     parse_args "$@"
+    if [ "$RT_CMD" = help ]; then
+        cmd_help "$RT_SUB"
+        return
+    fi
+    if [ "$RT_HELP" = 1 ]; then
+        cmd_help "$RT_CMD"
+        return
+    fi
+    if [ -z "$RT_CMD" ] && [ "${0##*/}" = "$RT_NAME" ]; then
+        RT_CMD=menu
+    fi
+    rt_open_tty
+    if [ "$RT_CMD" = menu ] && [ -z "$RT_SCOPE" ] && [ -d /etc/rtctl ] \
+        && [ "$(readlink -f "$0" 2>/dev/null || true)" = /usr/local/bin/rt ]; then
+        RT_SCOPE=system
+    fi
     resolve_scope
     scope_paths
     if [ -z "$RT_CMD" ]; then
@@ -3457,7 +3710,7 @@ main() {
             *) die "$EX_USAGE" '--dev 和 --stable 仅用于 install 或 upgrade' ;;
         esac
     fi
-    if [ "$RT_SCOPE" = system ] && [ "$RT_EUID" = 0 ]; then
+    if [ "$RT_CMD" != menu ] && [ "$RT_SCOPE" = system ] && [ "$RT_EUID" = 0 ]; then
         priv mkdir -p "$RT_LOG_DIR" 2>/dev/null || true
         priv chmod 0750 "$RT_LOG_DIR" 2>/dev/null || true
         priv chown root:root "$RT_LOG_DIR" 2>/dev/null || true

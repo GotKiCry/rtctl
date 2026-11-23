@@ -22,7 +22,7 @@ rtctl 提供的是远程 Shell，而不是低权限监控通道。部署前应�
 - **明文连接风险**：未启用 TLS 时，token、命令、输出和临时 sudo 的 root 密码可能被同网络攻击者读取或篡改。公网或共享网络必须使用 `wss://`。
 - **提权风险**：`allow_sudo` 与 NOPASSWD sudoers 组合等价于把 root 交给 token 持有者，应优先使用临时授权。
 - **日志风险**：agent 会记录命令文本和文件路径。不要在命令中直接包含密码或访问令牌，日志查看和转发也应限制权限。
-- **本地参数与输出风险**：client 的 token 参数可能进入 shell 历史或进程列表；`rtctl-agent -status` 默认显示完整 token，重定向输出或共享终端时可使用 `-print-token=false`。请妥善管理历史、日志与审计。
+- **本地参数与输出风险**：client 的 token 参数可能进入 shell 历史或进程列表。`rt status` 和 `rtctl-agent -status` 默认显示完整 token。需要重定向或分享状态时，分别使用 `--no-print-token` 和 `-print-token=false` 隐藏完整值。
 - **未认证信息**：`list` 无需 token，可读取主机名、操作系统、架构和版本；`/healthz` 也无需 token。应通过监听地址、防火墙或安全组限制来源。
 - **安装脚本信任**：`curl | sh` 会以当前权限执行远端内容。建议先下载、核对 Release 说明中的 SHA256，再执行；同一 Release 内的清单不能防止发布账号本身被入侵。
 
