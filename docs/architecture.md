@@ -2,35 +2,35 @@
 
 本文面向开发者，说明直连架构、消息协议、错误码和边界行为。安装与使用说明见 [README](../README.md)。
 
-## 1. 这个东西做什么
+## 1. 功能概述
 
-还是那两个二进制：
+rtctl 由两个二进制组成：
 
-- **rtctl-agent**：放在目标服务器上，自己开一个 WebSocket 服务口，等别人连。
-- **rtctl**：你电脑上的命令行工具，直接连 agent，发一条命令、收结果。
+- **rtctl-agent**：在目标机上监听 WebSocket 连接。
+- **rtctl**：在控制机上连接 agent，发送命令并接收结果。
 
-三种主要用法：
-1. **一次性命令**（`exec`）：发一条 Shell 命令，拿回输出和退出码。
-2. **交互式终端**（`shell`）：像 SSH 那样开一个会话，可以持续敲命令。
+支持三种主要用法：
+1. **一次性命令**（`exec`）：执行 Shell 命令并返回输出和退出码。
+2. **交互式终端**（`shell`）：建立可持续输入的远程终端会话。
 3. **文件传输**（`file-put` / `file-get`）：上传或下载单个文件。
 
-## 2. 怎么连
+## 2. 连接方式
 
 ```
 +----------+   直连 WebSocket    +------------------+
 |  rtctl   |  ----------------->  | agent（目标机）  |
-| (你电脑) |    JSON 消息         | (自己监听端口)   |
+| (控制机) |    JSON 消息         | (监听端口)       |
 +----------+                     +------------------+
 ```
 
 要点：
 
-- 没有中间服务器，agent 自己监听，rtctl 直连。
-- 每台设备一把钥匙（token）。**token 就是设备全部权限**，谁有谁操作。
+- 无需中继服务器，client 直接连接 agent。
+- 每台设备使用一个 token。持有者可以 agent 用户身份执行命令和传输文件；永久 sudo 授权还可开放 root 权限。
 - 客户端连接后发送 `auth`（可带 `id` 标识操作者）；exec、shell 和文件操作会校验 token，`list` 与 `/healthz` 无需 token。
-- agent 默认拒绝浏览器网页发起的跨站连接（防被人挂页面偷偷连）。
+- agent 默认校验 `Origin`，拒绝浏览器发起的跨站连接。
 
-## 3. 消息长什么样
+## 3. 消息格式
 
 所有消息都是 JSON，外面套一个统一格式：
 
@@ -144,15 +144,15 @@
 | sudo_denied | sudo 密码错误或服务器侧授权失败 |
 | approval_required | 特权命令没被确认（非交互没加 `-confirm-sudo`） |
 
-### 5.3 root 权限（sudo）怎么把关
+### 5.3 远程 sudo 授权
 
-想用 `-sudo` 执行 root 命令，三层缺一不可：
+使用 `-sudo` 执行 root 命令需要同时满足三层条件：
 
-1. **agent 层**：`allow_sudo = true`（默认关，防手滑）；
-2. **客户端层**：交互时当面 y/N 确认；程序调用必须显式 `-confirm-sudo`；
-3. **服务器层**：永久授权需要 sudoers 免密规则，临时授权需要有效的 root 密码。
+1. **agent 配置**：`allow_sudo = true`，默认关闭；
+2. **客户端确认**：交互终端需要 y/N 确认，程序调用必须显式指定 `-confirm-sudo`；
+3. **目标机授权**：永久授权需要 sudoers 免密规则，临时授权需要有效的 root 密码。
 
-永久授权通过 `sudo -n -- /bin/sh -c <命令>` 执行。临时授权由客户端使用 `-sudo-ask`（或脚本使用 `-sudo-password-stdin`）取得密码，agent 再通过 `sudo -S` 读取；密码只用于本次提权，不写入配置或日志。agent 本身始终保持普通用户运行，日志里特权命令会标 `(SUDO)`。
+永久授权通过 `sudo -n -- /bin/sh -c <命令>` 执行。临时授权由客户端使用 `-sudo-ask`（脚本使用 `-sudo-password-stdin`）取得密码，agent 再通过 `sudo -S` 读取。密码只用于本次提权，不写入配置或日志；未启用 TLS 时，密码会在网络中明文传输。agent 本身始终以普通用户运行，日志中的特权命令标记为 `(SUDO)`。
 
 ### 5.4 超时行为
 
@@ -175,10 +175,10 @@
 | agent | `-tls-cert` / `-tls-key` | 空 | 两个都填 = 开加密（WSS） |
 | agent | `-ws-path` | `/ws` | WebSocket 路径，健康检查同步注册在对应前缀下 |
 | agent | `-allow-sudo` | false | 允许 root 特权命令 |
-| agent | `-print-token` | true | 启动信息是否打印完整 token；服务安装时默认关闭 |
+| agent | `-print-token` | true | 启动及 `-status` 输出是否打印完整 token；服务安装时默认关闭 |
 | agent | `-open-firewall` | true | 启动时自动放行监听端口（best-effort：root/管理员直接执行，否则尝试免密 sudo；失败只提示不阻塞） |
 | agent | `-foreground` | false | 前台运行；默认直接启动会后台化，服务管理器托管时必须传此参数 |
-| agent | `-status` / `-stop` | — | 查询/停止 PID 文件对应的本机实例 |
+| agent | `-status` / `-stop` | — | 查询（默认显示 token）/停止 PID 文件对应的本机实例 |
 | agent | `-logs` | — | 查看运行日志后退出（自带脱敏与终端着色；只读日志，不启动服务） |
 | agent | `-follow` / `-lines` / `-no-color` | 100 行 | 仅配 `-logs`：跟随输出 / 显示行数 / 关颜色（`NO_COLOR` 环境变量同样生效） |
 | agent | `-log-file` | `~/.rtctl/agent.log` | 自管理运行日志（0600，约 10MB 轮转，保留 3 个备份） |

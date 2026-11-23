@@ -40,6 +40,17 @@ func statusListenAddr(o runtimeOptions) string {
 	return ":8443"
 }
 
+// statusToken 与运行时配置保持相同优先级：命令行 > 配置文件 > 环境变量。
+func statusToken(o runtimeOptions) string {
+	if o.token != "" {
+		return o.token
+	}
+	if c, err := loadConfig(o.configPath); err == nil && c.token != "" {
+		return c.token
+	}
+	return os.Getenv("RTCTL_TOKEN")
+}
+
 // portOccupiedHint 在监听地址已被占用时返回一行排查提示，否则返回空串。
 // 用于 -status：PID 文件显示未运行但端口被占时，说明存在未受管理的实例或其他程序。
 func portOccupiedHint(listen string) string {

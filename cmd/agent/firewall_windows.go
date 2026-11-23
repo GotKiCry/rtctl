@@ -26,8 +26,8 @@ func openFirewallPort(listen string) (firewallResult, error) {
 	out, err := exec.Command("netsh", args...).CombinedOutput()
 	if err != nil {
 		return firewallResult{
-			summary: fmt.Sprintf("⚠ 未放行（需管理员添加规则，port=%s）", port),
-			detail: fmt.Sprintf("自动添加防火墙规则失败：%s\n  请以管理员身份运行，或手动执行：\n    netsh %s",
+			summary: fmt.Sprintf("⚠ 未自动放行 TCP %s，需要管理员权限", port),
+			detail: fmt.Sprintf("自动配置防火墙失败：%s\n  请以管理员身份手动执行：\n    netsh %s",
 				strings.TrimSpace(string(out)), strings.Join(args, " ")),
 		}, err
 	}

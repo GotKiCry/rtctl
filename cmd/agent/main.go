@@ -90,7 +90,7 @@ func loadConfig(path string) (cfg, error) {
 
 // writeConfig 写配置（0600：token 属凭据）。
 func writeConfig(path string, c cfg) error {
-	content := fmt.Sprintf("# rtctl-agent 配置（token 即设备钥匙，请勿外泄）\n"+
+	content := fmt.Sprintf("# rtctl-agent 配置（token 是远程控制凭据，请勿泄露）\n"+
 		"listen = %s\n"+
 		"id = %s\n"+
 		"token = %s\n"+
@@ -216,28 +216,32 @@ func printStartup(c cfg, configPath, fwSummary string, showToken bool) {
 		hostPorts = append(hostPorts, net.JoinHostPort(host, port))
 	}
 
-	fmt.Printf("rtctl-agent 启动 ✔  (id=%s)\n", c.id)
-	fmt.Printf("  监听地址 : %s（%s，路径 %s）\n", c.listen, schema, wsPath)
-	fmt.Printf("  本机地址 : %s\n", strings.Join(hostPorts, " / "))
+	fmt.Printf("✔ rtctl-agent 启动（设备：%s）\n", c.id)
+	fmt.Printf("  监听 : %s（%s，路径 %s）\n", c.listen, schema, wsPath)
+	fmt.Printf("  地址 : %s\n", strings.Join(hostPorts, " / "))
 	if fwSummary != "" {
-		fmt.Printf("  防火墙   : %s\n", fwSummary)
+		fmt.Printf("  防火墙 : %s\n", fwSummary)
 	}
 	if showToken {
-		fmt.Printf("  设备 token: %s\n", c.token)
+		fmt.Printf("  token : %s\n", c.token)
 	} else {
-		fmt.Printf("  设备 token: <已隐藏>（查看: rt token show）\n")
+		fmt.Printf("  token : <已隐藏>（使用 -print-token=true 显示）\n")
 	}
-	fmt.Printf("  允许提权 : %v\n", c.allowSudo)
-	fmt.Printf("  配置文件 : %s\n", configPath)
-	fmt.Printf("  连接示例 :\n")
-	for _, hp := range hostPorts {
-		if wsPath == "/ws" {
-			fmt.Printf("    rtctl %s <token> 'uptime'   # 从控制机执行\n", hp)
+	sudoStatus := "关闭"
+	if c.allowSudo {
+		sudoStatus = "开启"
+	}
+	fmt.Printf("  远程 sudo : %s\n", sudoStatus)
+	fmt.Printf("  配置 : %s\n", configPath)
+	if len(hostPorts) > 0 {
+		fmt.Printf("  控制机执行 :\n")
+		if wsPath == "/ws" && schema == "ws" {
+			fmt.Printf("    rtctl %s <token> 'uptime'\n", hostPorts[0])
 		} else {
-			fmt.Printf("    rtctl -server %s://%s%s exec -token <token> -c 'uptime'   # 自定义路径\n", schema, hp, wsPath)
+			fmt.Printf("    rtctl -server %s://%s%s exec -token <token> -c 'uptime'\n", schema, hostPorts[0], wsPath)
 		}
 	}
-	fmt.Printf("⚠️  安全警告: token 即设备全部权限，请勿外泄；公网服务器请配置 tls_cert / tls_key 启用加密传输\n")
+	fmt.Printf("⚠ token 是远程控制凭据，请勿泄露；公网或共享网络必须启用 TLS。\n")
 }
 
 type runtimeOptions struct {
@@ -257,6 +261,23 @@ type runtimeOptions struct {
 	daemonReady  string
 }
 
+func runningStatusSummary(rec pidRecord, o runtimeOptions) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "rtctl-agent 运行中 (pid=%d)\n", rec.PID)
+	if o.printToken {
+		token := statusToken(o)
+		if token == "" {
+			token = "<无法从当前配置读取>"
+		}
+		fmt.Fprintf(&b, "  设备 token: %s\n", token)
+	} else {
+		fmt.Fprintln(&b, "  设备 token: <已隐藏>")
+	}
+	fmt.Fprintf(&b, "  日志文件 : %s\n", o.logFile)
+	fmt.Fprintf(&b, "  查看日志 : %s -logs -follow -log-file %s\n", strconv.Quote(os.Args[0]), strconv.Quote(o.logFile))
+	return b.String()
+}
+
 func main() {
 	os.Exit(runMain())
 }
@@ -269,10 +290,10 @@ func runMain() int {
 	token := flag.String("token", "", "设备 token（或环境变量 RTCTL_TOKEN）")
 	tlsCert := flag.String("tls-cert", "", "TLS 证书路径（与 -tls-key 同时提供则启用 WSS）")
 	tlsKey := flag.String("tls-key", "", "TLS 私钥路径")
-	allowSudo := flag.Bool("allow-sudo", false, "允许特权命令（sudo:true 经 sudo 提权；需 sudoers 放行，默认关闭）")
+	allowSudo := flag.Bool("allow-sudo", false, "允许远程 sudo（永久授权需 sudoers，临时授权需 root 密码；默认关闭）")
 	openFirewall := flag.Bool("open-firewall", true, "启动时自动放行监听端口（Linux: ufw/firewalld/iptables；Windows: netsh；需 root/管理员或免密 sudo；关闭用 -open-firewall=false）")
 	wsPath := flag.String("ws-path", "", "WebSocket 路径（默认 /ws；反向代理/路径前缀场景可改，如 /rt/ws）")
-	printToken := flag.Bool("print-token", true, "启动信息打印完整设备 token（设为 false 可避免 token 进入终端或日志采集）")
+	printToken := flag.Bool("print-token", true, "启动和 -status 输出完整 token；设为 false 可避免写入终端或日志")
 	showVersion := flag.Bool("version", false, "打印版本后退出")
 	foreground := flag.Bool("foreground", false, "前台运行（供调试或服务管理器托管；运行日志仍写入文件）")
 	statusMode := flag.Bool("status", false, "查询本机 agent 运行状态后退出")
@@ -332,12 +353,25 @@ func runMain() int {
 			log.Printf("写入配置失败: %v", err)
 			return 1
 		}
-		fmt.Printf("✔ 配置已生成: %s\n", *configPath)
-		fmt.Printf("  设备 ID      : %s\n", c.id)
-		fmt.Printf("  监听地址    : %s%s\n", c.listen, tlsNote(c.tlsCert))
-		fmt.Printf("  设备 token  : %s\n", c.token)
-		fmt.Printf("\n本机连接示例（把 <IP> 换成目标机地址）:\n  rtctl <IP>%s <token> 'uptime'\n", c.listen)
-		fmt.Printf("\n⚠️  安全警告: token 即设备全部权限，请仅通过安全渠道保存/分享；\n   公网服务器建议配置 tls_cert / tls_key 启用加密传输。\n")
+		initPort := "<端口>"
+		if _, port, err := net.SplitHostPort(c.listen); err == nil && port != "" {
+			initPort = port
+		}
+		initSchema := "ws"
+		if c.tlsCert != "" {
+			initSchema = "wss"
+		}
+		initPath := c.wsPath
+		if initPath == "" {
+			initPath = "/ws"
+		}
+		fmt.Printf("✔ 配置已生成：%s\n", *configPath)
+		fmt.Printf("  设备 ID : %s\n", c.id)
+		fmt.Printf("  监听 : %s（%s，路径 %s）\n", c.listen, initSchema, initPath)
+		fmt.Printf("  token : %s\n", c.token)
+		fmt.Printf("\n控制机执行（将 <目标机IP> 替换为实际地址）：\n")
+		fmt.Printf("  rtctl -server %s://<目标机IP>:%s%s exec -token <token> -c 'uptime'\n", initSchema, initPort, initPath)
+		fmt.Printf("\n⚠ token 是远程控制凭据，请勿泄露；公网或共享网络必须使用 TLS。\n")
 		return 0
 	}
 
@@ -372,8 +406,7 @@ func runMain() int {
 	}
 	if *statusMode {
 		if rec, running := runningPIDRecord(opts.pidFile); running {
-			fmt.Printf("rtctl-agent 运行中 (pid=%d)\n  日志文件 : %s\n", rec.PID, opts.logFile)
-			fmt.Printf("  查看日志 : %s -logs -follow -log-file %s\n", strconv.Quote(os.Args[0]), strconv.Quote(opts.logFile))
+			fmt.Print(runningStatusSummary(rec, opts))
 			return 0
 		}
 		fmt.Printf("rtctl-agent 未运行\n  PID 文件 : %s\n", opts.pidFile)
@@ -550,11 +583,4 @@ func reportRuntimeError(o runtimeOptions, err error) int {
 		fmt.Fprintf(os.Stderr, "rtctl-agent: %v\n", err)
 	}
 	return 1
-}
-
-func tlsNote(cert string) string {
-	if cert != "" {
-		return "（WSS）"
-	}
-	return ""
 }

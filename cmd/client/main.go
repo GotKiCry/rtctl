@@ -1,10 +1,10 @@
-// rtctl-client 控制端 CLI：直连目标设备的 agent 发指令。
+// rtctl 控制端 CLI：直连目标设备的 agent 发指令。
 //
 // 用法:
 //
-//	rtctl-client [全局参数] list
-//	rtctl-client [全局参数] exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-sudo] [-confirm-sudo] [-c 命令 | 命令...]
-//	rtctl-client [全局参数] shell -token <设备token>
+//	rtctl [全局参数] list
+//	rtctl [全局参数] exec -token <token> [-timeout ms] [-workdir dir] [-stdin-file f] [-sudo] [-confirm-sudo] [-c 命令 | 命令...]
+//	rtctl [全局参数] shell -token <token>
 //
 // 全局参数（必须放在子命令之前）:
 //
@@ -59,7 +59,7 @@ type execResult struct {
 }
 
 func main() {
-	fs := flag.NewFlagSet("rtctl-client", flag.ExitOnError)
+	fs := flag.NewFlagSet("rtctl", flag.ExitOnError)
 	fs.StringVar(&serverURL, "server", "ws://127.0.0.1:8443/ws", "设备地址（agent 直连地址）")
 	fs.StringVar(&clientID, "client-id", "", "操作者/Agent 标识（记日志用）")
 	fs.BoolVar(&jsonMode, "json", false, "结构化输出（list / exec）")
@@ -67,6 +67,7 @@ func main() {
 	fs.StringVar(&caFile, "cafile", "", "自定义 CA 证书文件（自签 / 私有 CA 场景）")
 	fs.BoolVar(&insecureTLS, "insecure", false, "跳过 TLS 证书校验（仅调试用，勿用于生产）")
 	showVersion := fs.Bool("version", false, "打印版本后退出")
+	fs.Usage = usage
 	fs.Parse(os.Args[1:])
 
 	if *showVersion {
@@ -117,15 +118,38 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, "rtctl - 远程终端控制端\n\n用法:\n  rtctl <host:port> <token> <命令...>                     # 快捷: 直接执行一条命令\n  rtctl [全局参数] list\n  rtctl [全局参数] exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-sudo] [-confirm-sudo] [-c 命令 | 命令...]\n  rtctl [全局参数] shell -token <设备token>\n  rtctl [全局参数] file-put -token <设备token> [-mode 0644] <本地文件> <远端路径>\n  rtctl [全局参数] file-get -token <设备token> <远端路径> <本地文件>\n\n快速上手:\n  # 目标机: ./rtctl-agent -init 生成配置后自动带监听\n  # 本机:   rtctl 192.168.1.5:8443 <token> 'uptime'\n\n全局参数:\n  -server    设备地址（agent 直连地址，默认 ws://127.0.0.1:8443/ws）\n  -client-id 操作者/Agent 标识（记日志用）\n  -json      结构化输出（list / exec 生效）\n  -quiet     关闭执行上下文摘要（目标地址/命令/耗时打印在 stderr，不污染命令输出）\n\n特权命令（-sudo）:\n  需被控端 agent 开启 -allow-sudo；交互下 CLI 会向用户当面确认，非交互须显式 -confirm-sudo。\n")
-}
+	fmt.Fprint(os.Stderr, `rtctl - 远程终端客户端
 
-// orDashID 空标识显示为 "-"。
-func orDashID(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "-"
-	}
-	return s
+用法：
+  rtctl <目标机IP:端口> <token> '<命令>'
+  rtctl [全局选项] <命令> [命令选项]
+
+命令：
+  list       查看目标机信息
+  exec       执行一次命令并返回输出和退出码
+  shell      打开交互式远程终端
+  file-put   上传文件
+  file-get   下载文件
+
+示例：
+  rtctl 192.168.1.5:8443 <token> 'uptime'
+  rtctl -server wss://192.168.1.5:8443/ws exec -token <token> -c 'uptime'
+
+全局选项（必须放在子命令之前）：
+  -server URL      目标机地址，默认 ws://127.0.0.1:8443/ws
+  -cafile FILE     指定自签或私有 CA 证书
+  -insecure        跳过 TLS 证书校验，仅限调试
+  -client-id ID    操作者标识，用于目标机日志
+  -json            list 和 exec 使用 JSON 输出
+  -quiet           不显示目标、命令和耗时摘要
+  -version         显示版本
+
+查看命令选项：rtctl exec -h、rtctl shell -h、rtctl file-put -h
+
+远程 sudo：
+  目标机必须允许 sudo；交互执行需要确认，脚本执行需要 -confirm-sudo。
+  临时授权使用 -sudo -sudo-ask；公网或共享网络必须使用 wss://，否则 token 和 root 密码可能泄露。
+`)
 }
 
 // clip 按 rune 截断长字符串（显示前 n 个字符 + 省略号），用于摘要行。
@@ -262,7 +286,7 @@ func cmdExec(args []string) error {
 	sub.Parse(args)
 	rest := sub.Args()
 	if *token == "" || (*rawCmd == "" && len(rest) == 0) {
-		fmt.Fprintln(os.Stderr, "用法: rtctl-client exec -token <设备token> [-timeout ms] [-workdir dir] [-stdin-file f] [-sudo] [-confirm-sudo] [-c 命令 | 命令...]")
+		fmt.Fprintln(os.Stderr, "用法：rtctl exec -token <token> -c '<命令>' [选项]；完整选项：rtctl exec -h")
 		os.Exit(2)
 	}
 	var cmdStr string
@@ -274,14 +298,14 @@ func cmdExec(args []string) error {
 	// 特权命令审批：交互终端向用户当面确认；非交互（Agent/管道）必须显式 -confirm-sudo
 	if *sudo && !*confirmSudo {
 		if !term.IsTerminal(int(os.Stdin.Fd())) {
-			return errors.New("特权命令需要用户批准：交互运行确认提示，或显式加 -confirm-sudo")
+			return errors.New("远程 sudo 需要确认：请在交互终端运行，或为脚本显式添加 -confirm-sudo")
 		}
-		fmt.Printf("⚠ 此命令将以 root 提权执行: %s\n确认？[y/N] ", cmdStr)
+		fmt.Printf("⚠ 将以 root 执行：%s\n确认？[y/N] ", cmdStr)
 		reader := bufio.NewReader(os.Stdin)
 		line, _ := reader.ReadString('\n')
 		line = strings.TrimSpace(strings.ToLower(line))
 		if line != "y" && line != "yes" {
-			return errors.New("用户取消特权命令")
+			return errors.New("已取消远程 sudo 命令")
 		}
 	}
 	// 临时提权（临时授权）：当场读取 root 密码，随请求发给 agent，由 agent 用 `sudo -S` 使用。
@@ -289,7 +313,7 @@ func cmdExec(args []string) error {
 	sudoPw := ""
 	if *sudoAsk || *sudoPwStdin {
 		if !*sudo {
-			return errors.New("-sudo-ask / -sudo-password-stdin 必须与 -sudo 一起使用")
+			return errors.New("-sudo-ask 和 -sudo-password-stdin 必须与 -sudo 一起使用")
 		}
 		if *sudoPwStdin {
 			b, rerr := io.ReadAll(os.Stdin)
@@ -299,9 +323,9 @@ func cmdExec(args []string) error {
 			sudoPw = strings.TrimRight(string(b), "\r\n")
 		} else {
 			if !term.IsTerminal(int(os.Stdin.Fd())) {
-				return errors.New("需要终端才能提示输入 root 密码；脚本调用请改用 -sudo-password-stdin")
+				return errors.New("交互输入 root 密码需要终端；脚本请使用 -sudo-password-stdin")
 			}
-			fmt.Fprint(os.Stderr, "root 密码: ")
+			fmt.Fprint(os.Stderr, "root 密码：")
 			b, rerr := term.ReadPassword(int(os.Stdin.Fd()))
 			fmt.Fprintln(os.Stderr)
 			if rerr != nil {
@@ -310,7 +334,10 @@ func cmdExec(args []string) error {
 			sudoPw = string(b)
 		}
 		if sudoPw == "" {
-			return errors.New("未输入 root 密码")
+			return errors.New("root 密码不能为空")
+		}
+		if strings.HasPrefix(serverURL, "ws://") {
+			fmt.Fprintln(os.Stderr, "⚠ 当前未启用 TLS，root 密码将明文传输")
 		}
 	}
 	var stdinData string
@@ -339,8 +366,7 @@ func cmdExec(args []string) error {
 	}
 	// 执行上下文摘要（stderr，不污染命令输出；-json/-quiet 时关闭）
 	if !jsonMode && !quietMode {
-		fmt.Fprintf(os.Stderr, "→ %s | client=%s | exec: %s\n",
-			serverURL, orDashID(clientID), clip(cmdStr, 80))
+		fmt.Fprintf(os.Stderr, "→ %s | %s\n", serverURL, clip(cmdStr, 80))
 	}
 
 	// 客户端读超时：避免 server/agent 异常时永久挂起
@@ -393,17 +419,17 @@ func cmdExec(args []string) error {
 						lastNL = true
 					}
 					if p.Truncated {
-						fmt.Fprintln(os.Stderr, "[警告: 输出太多，已截断]")
+						fmt.Fprintln(os.Stderr, "[警告：输出不完整，部分内容已丢弃]")
 					}
 					if p.Error != "" {
 						fmt.Fprintf(os.Stderr, "[%s]\n", p.Error)
 					}
 					if !quietMode {
 						if p.ErrorCode != "" {
-							fmt.Fprintf(os.Stderr, "← exit=%d errcode=%s 耗时=%dms\n",
+							fmt.Fprintf(os.Stderr, "← 退出码 %d，错误码 %s，耗时 %dms\n",
 								p.ExitCode, p.ErrorCode, time.Since(start).Milliseconds())
 						} else {
-							fmt.Fprintf(os.Stderr, "← exit=%d 耗时=%dms\n",
+							fmt.Fprintf(os.Stderr, "← 退出码 %d，耗时 %dms\n",
 								p.ExitCode, time.Since(start).Milliseconds())
 						}
 					}
@@ -434,7 +460,7 @@ func cmdShell(args []string) error {
 	token := sub.String("token", "", "目标设备 token")
 	sub.Parse(args)
 	if *token == "" {
-		fmt.Fprintln(os.Stderr, "用法: rtctl-client shell -token <设备token>")
+		fmt.Fprintln(os.Stderr, "用法: rtctl shell -token <token>")
 		os.Exit(2)
 	}
 
@@ -475,8 +501,7 @@ func cmdShell(args []string) error {
 		}
 	}
 
-	fmt.Printf("=== 已进入远程终端 %s（client=%s，输入 exit 退出，Ctrl+D 断开）===\n",
-		serverURL, orDashID(clientID))
+	fmt.Printf("已连接远程终端 %s；输入 exit 或按 Ctrl+D 退出。\n", serverURL)
 
 	// 本地终端进入 raw 模式，把键盘输入原样转发
 	fd := int(os.Stdin.Fd())
@@ -541,7 +566,7 @@ func cmdShell(args []string) error {
 			}
 			os.Stdout.WriteString(p.Data)
 		case proto.TypeShellClose:
-			fmt.Println("\n=== 终端已关闭 ===")
+			fmt.Println("\n远程终端已关闭。")
 			return nil
 		case proto.TypeError:
 			var p proto.ErrorPayload

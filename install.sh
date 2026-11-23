@@ -125,6 +125,11 @@ hint() {
     printf '%s   %s%s\n' "$C_DIM" "$*" "$C_RST"
 }
 
+detail() {
+    if [ "$RT_QUIET" = 1 ] || [ "$RT_VERBOSE" != 1 ]; then return 0; fi
+    printf '%s   %s%s\n' "$C_DIM" "$*" "$C_RST"
+}
+
 die() {
     _rt_die_code=$1
     shift
@@ -795,7 +800,7 @@ tls_generate() {
         atomic_put "$_rt_tg_tmp/agent.key" "$_rt_tg_dir/agent.key" 0600 || die "$EX_FAIL" "写入 agent.key 失败"
     fi
     rm -rf "$_rt_tg_tmp" 2>/dev/null || true
-    ok "已生成自签证书：$_rt_tg_dir/agent.crt + agent.key（CA: $_rt_tg_dir/ca.crt）"
+    detail "已生成自签 CA 和服务器证书：$_rt_tg_dir"
 }
 
 tls_verify_pair() {
@@ -812,17 +817,15 @@ tls_verify_pair() {
 
 tls_ca_import_hint() {
     _rt_tci_ca=${1:-/etc/rtctl/tls/ca.crt}
-    say ''
-    info '── TLS 已启用：控制机必须先信任本机 CA，否则报 x509: unknown authority ──'
-    hint "1) 把 CA 拷到控制机： scp root@<本机IP>:$_rt_tci_ca ."
-    hint "2) Debian/Ubuntu 控制机："
-    hint "   sudo cp rtctl-ca.crt $RT_CA_IMPORT_DEBIAN && sudo update-ca-certificates"
-    hint "3) RHEL/CentOS/Rocky/Fedora 控制机："
-    hint "   sudo cp rtctl-ca.crt $RT_CA_IMPORT_RHEL && sudo update-ca-trust"
-    hint "4) Windows 控制机（管理员 PowerShell）："
-    hint "   Import-Certificate -FilePath .\\rtctl-ca.crt -CertStoreLocation Cert:\\LocalMachine\\Root"
-    hint "5) 连接示例（TLS 下不要用快捷入口，它会被强制补 ws://）："
-    hint "   rtctl -server wss://<本机IP>:<端口>${RT_WS_PATH_STATE} exec -token <token> -c 'uptime'"
+    say 'TLS  : 已启用（自签 CA）'
+    hint "将 CA 安全复制到控制机并命名为 rtctl-ca.crt：$_rt_tci_ca"
+    hint '上面的连接命令已通过 -cafile 指定 CA，无需导入系统信任库'
+    if [ "$RT_VERBOSE" = 1 ]; then
+        info '可选：将 CA 导入控制机的系统信任库'
+        hint "Debian/Ubuntu：sudo cp rtctl-ca.crt $RT_CA_IMPORT_DEBIAN && sudo update-ca-certificates"
+        hint "RHEL/CentOS/Rocky/Fedora：sudo cp rtctl-ca.crt $RT_CA_IMPORT_RHEL && sudo update-ca-trust"
+        hint 'Windows（管理员 PowerShell）：Import-Certificate -FilePath .\rtctl-ca.crt -CertStoreLocation Cert:\LocalMachine\Root'
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -841,22 +844,22 @@ nologin_shell() {
 ensure_run_user() {
     [ "$RT_SCOPE" = system ] || return 0
     if run_user_exists; then
-        ok "运行用户 $RT_RUN_USER 已存在（幂等跳过）"
+        detail "运行用户已存在：$RT_RUN_USER"
     else
         _rt_eru_sh=$(nologin_shell)
         if have useradd; then
             priv useradd -r -M -d /nonexistent -s "$_rt_eru_sh" "$RT_RUN_USER" \
-                || die "$EX_FAIL" "创建运行用户失败：useradd -r -M -d /nonexistent -s $_rt_eru_sh $RT_RUN_USER"
+                || die "$EX_FAIL" "创建运行用户失败：$RT_RUN_USER"
         elif have adduser; then
             priv adduser -S -D -H -s /sbin/nologin "$RT_RUN_USER" \
-                || die "$EX_FAIL" "创建运行用户失败：adduser -S -D -H -s /sbin/nologin $RT_RUN_USER"
+                || die "$EX_FAIL" "创建运行用户失败：$RT_RUN_USER"
         else
             die "$EX_FAIL" "缺少 useradd/adduser，无法创建运行用户 $RT_RUN_USER"
         fi
         if ! run_user_exists; then
-            die "$EX_FAIL" "创建运行用户 $RT_RUN_USER 后仍检测不到（id -u 失败）"
+            die "$EX_FAIL" "运行用户创建后仍不可用：$RT_RUN_USER"
         fi
-        ok "已创建运行用户 $RT_RUN_USER（无 home、不可登录）"
+        detail "已创建运行用户：$RT_RUN_USER"
     fi
     if have getent && ! getent group "$RT_RUN_GROUP" >/dev/null 2>&1; then
         if have groupadd; then
@@ -878,11 +881,10 @@ agent_init_config() {
     _rt_aic_tls_key=${5:-}
     _rt_aic_allow_sudo=${6:-0}
     if conf_exists; then
-        say "配置已存在，保留既有 token：$RT_CONF"
-        hint "轮换 token：$RT_NAME token reset    （配置冲突码 exit 8）"
+        detail "保留既有配置和 token：$RT_CONF"
         return 0
     fi
-    [ -x "$RT_BIN_AGENT" ] || die "$EX_FAIL" "agent 二进制不可执行：$RT_BIN_AGENT"
+    [ -x "$RT_BIN_AGENT" ] || die "$EX_FAIL" "agent 不可执行：$RT_BIN_AGENT"
     _rt_aic_dir=$(dirname "$RT_CONF")
     if [ "$RT_SCOPE" = system ]; then
         priv install -d -m 0750 -o root -g "$RT_RUN_GROUP" "$_rt_aic_dir" \
@@ -904,10 +906,10 @@ agent_init_config() {
         set -- "$@" -allow-sudo
     fi
     if ! priv "$RT_BIN_AGENT" "$@" >/dev/null 2>"$_rt_aic_err"; then
-        err "agent -init 失败："
+        err "初始化 agent 配置失败："
         sanitize_text <"$_rt_aic_err" >&2 || true
         rm -f "$_rt_aic_err" 2>/dev/null || true
-        die "$EX_FAIL" "生成配置失败（$RT_CONF 未被创建）"
+        die "$EX_FAIL" "未生成配置文件：$RT_CONF"
     fi
     if [ -s "$_rt_aic_err" ]; then
         sanitize_text <"$_rt_aic_err" | while IFS= read -r _rt_aic_line; do
@@ -915,9 +917,9 @@ agent_init_config() {
         done
     fi
     rm -f "$_rt_aic_err" 2>/dev/null || true
-    [ -f "$RT_CONF" ] || die "$EX_FAIL" "agent -init 未生成配置文件：$RT_CONF"
+    [ -f "$RT_CONF" ] || die "$EX_FAIL" "agent 未生成配置文件：$RT_CONF"
     conf_finish_perms "$RT_CONF"
-    ok "已生成配置：$RT_CONF（0600 $RT_RUN_USER:$RT_RUN_GROUP）"
+    detail "已生成配置：$RT_CONF"
     return 0
 }
 
@@ -1023,28 +1025,28 @@ fetch_assets() {
     chmod 0700 "$_rt_fa_dir" 2>/dev/null || true
     RT_DL_DIR=$_rt_fa_dir
     _rt_fa_sums="$_rt_fa_dir/SHA256SUMS.txt"
-    say "下载校验清单：$_rt_fa_base/SHA256SUMS.txt"
+    detail "下载校验清单：$_rt_fa_base/SHA256SUMS.txt"
     if ! dl_url "$_rt_fa_base/SHA256SUMS.txt" "$_rt_fa_sums"; then
         die "$EX_DOWNLOAD" "下载 SHA256SUMS.txt 失败：$_rt_fa_base/SHA256SUMS.txt"
     fi
     if [ ! -s "$_rt_fa_sums" ]; then
-        die "$EX_DOWNLOAD" "SHA256SUMS.txt 为空（镜像/代理返回了错误页？）"
+        die "$EX_DOWNLOAD" "SHA256SUMS.txt 为空，请检查下载地址或代理返回的内容"
     fi
     _rt_fa_agent="$_rt_fa_dir/rtctl-agent-linux-$_rt_fa_arch"
-    say "下载 agent：$_rt_fa_base/rtctl-agent-linux-$_rt_fa_arch"
+    detail "下载 agent：$_rt_fa_base/rtctl-agent-linux-$_rt_fa_arch"
     if ! dl_url "$_rt_fa_base/rtctl-agent-linux-$_rt_fa_arch" "$_rt_fa_agent"; then
-        die "$EX_DOWNLOAD" "下载 agent 二进制失败（检查网络/代理 --proxy）"
+        die "$EX_DOWNLOAD" "下载 agent 失败，请检查网络或使用 --proxy 指定代理"
     fi
     if ! check_elf "$_rt_fa_agent"; then
-        die "$EX_CHECKSUM" "下载内容不是 ELF 二进制（可能拿到 HTML 错误页或错架构）"
+        die "$EX_CHECKSUM" "下载的 agent 不是有效的 Linux 二进制，可能收到错误页或架构不匹配"
     fi
     _rt_fa_rc=0
     verify_asset "$_rt_fa_agent" "rtctl-agent-linux-$_rt_fa_arch" "$_rt_fa_sums" || _rt_fa_rc=$?
     case "$_rt_fa_rc" in
-        0) ok "agent SHA256 校验通过" ;;
-        2) die "$EX_CHECKSUM" "校验清单中没有 rtctl-agent-linux-$_rt_fa_arch 的条目（禁止跳过校验）" ;;
-        3) die "$EX_CHECKSUM" "缺少 sha256sum/shasum/openssl，无法校验（禁止跳过校验）" ;;
-        *) die "$EX_CHECKSUM" "agent SHA256 校验失败（下载损坏或版本不匹配）" ;;
+        0) detail "agent SHA256 校验通过" ;;
+        2) die "$EX_CHECKSUM" "校验清单缺少 rtctl-agent-linux-$_rt_fa_arch，安装已中止" ;;
+        3) die "$EX_CHECKSUM" "缺少 SHA256 校验工具，安装已中止" ;;
+        *) die "$EX_CHECKSUM" "agent SHA256 校验失败，文件可能损坏或版本不匹配" ;;
     esac
     RT_DL_AGENT=$_rt_fa_agent
     RT_DL_CLIENT=''
@@ -1052,12 +1054,12 @@ fetch_assets() {
     if dl_url "$_rt_fa_base/rtctl-linux-$_rt_fa_arch" "$_rt_fa_client" 2>/dev/null && check_elf "$_rt_fa_client"; then
         if verify_asset "$_rt_fa_client" "rtctl-linux-$_rt_fa_arch" "$_rt_fa_sums"; then
             RT_DL_CLIENT=$_rt_fa_client
-            ok "客户端 rtctl 已下载并校验（用于本机自检探针）"
+            detail "客户端 rtctl 已下载并校验"
         else
-            warn "客户端校验失败，跳过（不影响 agent 安装）"
+            warn "客户端校验失败，将继续安装 agent，但本机 token 验证可能不可用"
         fi
     else
-        warn "客户端 rtctl 下载失败，跳过（不影响 agent 安装；token reset 的双探针会降级）"
+        warn "客户端下载失败，将继续安装 agent，但本机 token 验证可能不可用"
     fi
     RT_DL_SCRIPT=''
     _rt_fa_script="$_rt_fa_dir/install.sh"
@@ -1065,7 +1067,7 @@ fetch_assets() {
         if verify_asset "$_rt_fa_script" "install.sh" "$_rt_fa_sums"; then
             RT_DL_SCRIPT=$_rt_fa_script
         else
-            warn "install.sh 校验失败，改用当前脚本本体落盘"
+            warn "install.sh 校验失败，将使用当前脚本"
         fi
     fi
     return 0
@@ -1210,15 +1212,15 @@ render_unit() {
         atomic_put "$_rt_ru_tmp" "$RT_UNIT" 0644 || { rm -f "$_rt_ru_tmp"; die "$EX_FAIL" "写入 unit 失败：$RT_UNIT"; }
     fi
     rm -f "$_rt_ru_tmp" 2>/dev/null || true
-    ok "已渲染服务单元：$RT_UNIT（NoNewPrivileges=$_rt_ru_nnp${_rt_ru_extra}）"
+    detail "服务单元：$RT_UNIT（NoNewPrivileges=$_rt_ru_nnp${_rt_ru_extra}）"
     if [ "$RT_CAP_PRINT_TOKEN" != true ]; then
-        warn "当前 agent 不支持 -print-token：unit 未传该 flag，启动块会把完整 token 打进 journald，建议尽快升级"
+        warn "当前 agent 无法隐藏启动 token，完整 token 可能写入日志，请尽快升级"
     fi
     if [ "$RT_CAP_OPEN_FIREWALL" != true ]; then
-        warn "当前 agent 不支持 -open-firewall：unit 未传该 flag，agent 每次启动都会尝试放行防火墙"
+        warn "当前 agent 无法关闭自动防火墙配置，每次启动可能尝试放行端口"
     fi
     if [ -n "$_rt_ru_ws" ] && [ "$_rt_ru_ws" != '/ws' ] && [ "$RT_CAP_WS_PATH" != true ]; then
-        warn "当前 agent 不支持 -ws-path，配置里的 ws_path=$_rt_ru_ws 会被忽略（实际仍是 /ws）"
+        warn "当前 agent 不支持 -ws-path，将忽略 ws_path=$_rt_ru_ws 并继续使用 /ws"
     fi
 }
 
@@ -1568,7 +1570,7 @@ fw_apply() {
     RT_FW_UNDO=''
     if ! fw_can_modify; then
         RT_FW_BACKEND='none'
-        hint "无 root/可用 sudo，跳过防火墙修改，仅检查 $_rt_fa_port/tcp 是否可连通"
+        warn "未修改防火墙（需要 root 或免密 sudo）；若控制机无法连接，请放行 $_rt_fa_port/tcp"
         return 0
     fi
     _rt_fa_backend=$(fw_detect)
@@ -1712,25 +1714,18 @@ health_check() {
 # ---------------------------------------------------------------------------
 print_sudo_guide() {
     say ''
-    info '── 两层 sudo 授权（按需选择，风险自负）──'
-    hint '第 1 层｜脚本层（安装器自己提权）：--sudo ask（默认，当场提示密码） / --sudo nopasswd（写 /etc/sudoers.d/rt-installer 免密）'
-    hint '第 2 层｜agent 层（远程命令提权，两种形态）：'
-    hint "  · 永久授权：$RT_NAME sudo enable  → 写 /etc/sudoers.d/rtctl-agent（rtctl ALL=(ALL) NOPASSWD: /bin/sh,/usr/bin/sh,/usr/bin/kill,/bin/kill）"
-    hint "  · 临时授权：$RT_NAME sudo temp    → 不写 sudoers；控制端 rtctl exec -sudo 当场输入 root 密码，agent 用 sudo -S 从 stdin 读取"
-    warn "永久授权 = 任何持有本机 token 的人都能直接获得 root；临时授权不落盘密码但需要每次输入"
-    hint "查看当前状态：$RT_NAME sudo status    关闭永久授权：$RT_NAME sudo disable"
+    info '远程 sudo（默认关闭）'
+    hint "永久授权：$RT_NAME sudo enable    token 持有者可免密码获得 root"
+    hint "临时授权：$RT_NAME sudo temp      每次输入 root 密码，不写入 sudoers"
+    hint "关闭授权：$RT_NAME sudo disable"
 }
 
 print_proxy_hint() {
     _rt_pph_domain=${1:-<你的域名>}
-    _rt_pph_port=${RT_PORT_STATE:-}
-    _rt_pph_path=${RT_WS_PATH_STATE:-/ws}
     say ''
-    info '── 反向代理 / 路径前缀（agent 已支持 -ws-path）──'
-    hint "生成完整模板：$RT_NAME proxy nginx   /   $RT_NAME proxy caddy"
-    hint "nginx 关键片段（/rt/ 前缀）：location /rt/ { proxy_pass http://127.0.0.1:$_rt_pph_port/; }  +  WebSocket 升级头"
-    hint "caddy 关键片段：$_rt_pph_domain { handle_path /rt/* { reverse_proxy 127.0.0.1:$_rt_pph_port } }"
-    hint "路径前缀时把 agent 的 ws_path 设为 /rt$_rt_pph_path（$RT_NAME config set ws_path /rt$_rt_pph_path --restart）"
+    info '反向代理配置'
+    hint "nginx：$RT_NAME proxy nginx --proxy-domain $_rt_pph_domain"
+    hint "Caddy：$RT_NAME proxy caddy --proxy-domain $_rt_pph_domain"
 }
 
 print_guidance() {
@@ -1738,55 +1733,65 @@ print_guidance() {
     _rt_pg_port=${RT_PORT_STATE:-}
     _rt_pg_ws=${RT_WS_PATH_STATE:-/ws}
     _rt_pg_tls=${RT_TLS_ENABLED:-false}
-    _rt_pg_scheme='ws'
-    if [ "$_rt_pg_tls" = true ]; then _rt_pg_scheme='wss'; fi
     _rt_pg_status='未运行'
-    if svc_active; then _rt_pg_status='active'; fi
-    _rt_pg_enabled='no'
-    if svc_enabled; then _rt_pg_enabled='yes'; fi
+    if svc_active; then _rt_pg_status='运行中'; fi
+    _rt_pg_enabled='否'
+    if svc_enabled; then _rt_pg_enabled='是'; fi
+    _rt_pg_rt=$RT_NAME
+    if [ "$RT_SCOPE" = system ] && [ "$RT_EUID" != 0 ]; then _rt_pg_rt="sudo $RT_NAME"; fi
     _rt_pg_token=$(token_value 2>/dev/null || true)
     hr
-    info '── 下一步 ──'
-    say "服务状态 : $_rt_pg_status (enabled=$_rt_pg_enabled)，后端=$RT_INIT，监听=$_rt_pg_listen"
-    say "本机地址 : $(local_ips | tr '\n' ' ')"
+    info '连接信息'
+    say "服务 : $_rt_pg_status（$RT_INIT），开机自启：$_rt_pg_enabled"
+    say "监听 : $_rt_pg_listen"
+    say "地址 : $(local_ips | tr '\n' ' ')"
     if [ -n "$_rt_pg_token" ]; then
         if [ -t 1 ] && [ "${RT_NO_PRINT_TOKEN:-0}" != 1 ] && [ "$RT_QUIET" != 1 ]; then
-            say "设备 token: $_rt_pg_token"
-            warn "token 即设备全部权限，勿贴群聊/工单/截图；如需隐藏下次用 --no-print-token"
+            say "token : $_rt_pg_token"
         else
-            say "设备 token: $(mask_token "$_rt_pg_token")  fingerprint=$(fingerprint_of "$_rt_pg_token")"
+            say "token : $(mask_token "$_rt_pg_token")"
         fi
-        hint "查看完整 token：$RT_NAME token show --reveal   （需交互终端）"
+        warn 'token 是远程控制凭据，请勿泄露'
+        hint "再次查看：$_rt_pg_rt token show --reveal（需交互终端）"
     else
-        hint "查看 token：sudo $RT_NAME token show --reveal"
+        hint "查看 token：$_rt_pg_rt token show --reveal（需交互终端）"
     fi
-    say '控制机上执行（先下载客户端）：'
+    say ''
+    say '在 Linux 控制机下载客户端并执行：'
     hint "curl -fsSL $RT_RELEASES/latest/download/rtctl-linux-amd64 -o rtctl && chmod +x rtctl"
     _rt_pg_ip=$(local_ips | head -n1 || printf '127.0.0.1')
-    if [ "$_rt_pg_tls" = true ]; then
-        hint "rtctl -server wss://$_rt_pg_ip:$_rt_pg_port$_rt_pg_ws exec -token <token> -c 'uptime'"
-    elif [ "$_rt_pg_ws" = '/ws' ]; then
-        hint "rtctl $_rt_pg_ip:$_rt_pg_port <token> 'uptime'"
-    else
-        hint "rtctl -server ws://$_rt_pg_ip:$_rt_pg_port$_rt_pg_ws exec -token <token> -c 'uptime'"
+    _rt_pg_ca=''
+    if [ "$_rt_pg_tls" = true ] && [ -n "${RT_TLS_CERT_STATE:-}" ]; then
+        _rt_pg_ca="$(dirname "$RT_TLS_CERT_STATE")/ca.crt"
     fi
-    say "本机自检 : $RT_NAME doctor      实时日志 : $RT_NAME logs -f"
-    say "改配置   : $RT_NAME config edit   卸载 : $RT_NAME uninstall"
-    if [ "$_rt_pg_tls" = true ]; then
-        say "TLS      : 已启用（$_rt_pg_scheme），证书 ${RT_TLS_CERT_STATE:-$(state_get TLS_CERT)}"
-        tls_ca_import_hint "${RT_TLS_CERT_STATE%/*}/ca.crt"
+    if [ "$_rt_pg_tls" = true ] && [ -n "$_rt_pg_ca" ] && [ -f "$_rt_pg_ca" ]; then
+        hint "./rtctl -server wss://$_rt_pg_ip:$_rt_pg_port$_rt_pg_ws -cafile ./rtctl-ca.crt exec -token <token> -c 'uptime'"
+    elif [ "$_rt_pg_tls" = true ]; then
+        hint "./rtctl -server wss://$_rt_pg_ip:$_rt_pg_port$_rt_pg_ws exec -token <token> -c 'uptime'"
+    elif [ "$_rt_pg_ws" = '/ws' ]; then
+        hint "./rtctl $_rt_pg_ip:$_rt_pg_port <token> 'uptime'"
     else
-        warn "当前为明文 $_rt_pg_scheme：token 与命令在网络上明文传输，同网段可被截获"
-        warn "补救：$RT_NAME install --tls-generate   （自签 CA + 服务器证书，并打印控制机导入 CA 的命令）"
-        warn "      $RT_NAME config set tls_cert /etc/rtctl/tls/agent.crt 与 tls_key /etc/rtctl/tls/agent.key"
+        hint "./rtctl -server ws://$_rt_pg_ip:$_rt_pg_port$_rt_pg_ws exec -token <token> -c 'uptime'"
+    fi
+    say ''
+    hint "状态：$_rt_pg_rt status    日志：$_rt_pg_rt logs -f"
+    hint "配置：$_rt_pg_rt config edit    更多命令：$RT_NAME help"
+    if [ "$_rt_pg_tls" = true ]; then
+        if [ -n "$_rt_pg_ca" ] && [ -f "$_rt_pg_ca" ]; then
+            tls_ca_import_hint "$_rt_pg_ca"
+        else
+            say 'TLS  : 已启用（wss）'
+        fi
+    else
+        warn '当前未启用 TLS，token、命令和输出将明文传输'
+        hint "公网或共享网络必须先启用 TLS：$_rt_pg_rt install --tls-generate"
     fi
     if [ -n "${RT_PROXY_DOMAIN:-}" ]; then
         print_proxy_hint "$RT_PROXY_DOMAIN"
-    else
-        hint "需要反向代理/路径前缀？$RT_NAME proxy nginx|caddy 模板随时可生成"
+    elif [ "$RT_VERBOSE" = 1 ]; then
+        print_proxy_hint
     fi
-    print_sudo_guide
-    hr
+    if [ "$RT_VERBOSE" = 1 ]; then print_sudo_guide; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1820,31 +1825,31 @@ install_one_binary() {
 cmd_install() {
     [ "$RT_SCOPE" = system ] && require_root_or_die
     if ! have curl && ! have wget; then
-        die "$EX_DOWNLOAD" "缺少 curl 与 wget：请先安装其一（Debian: apt install curl；Alpine: apk add curl）"
+        die "$EX_DOWNLOAD" "缺少 curl 和 wget：请先安装其中一个（Debian/Ubuntu：apt install curl；Alpine：apk add curl）"
     fi
     if ! have sha256sum && ! have shasum && ! have openssl; then
-        die "$EX_CHECKSUM" "缺少 sha256sum/shasum/openssl：无法校验下载内容（禁止跳过校验）"
+        die "$EX_CHECKSUM" "缺少 SHA256 校验工具：请安装 sha256sum、shasum 或 openssl"
     fi
     if [ -n "$RT_PINNED" ]; then
         if [ ! -f "$0" ]; then
-            die "$EX_USAGE" "--pinned-sha256 在管道执行（curl|sh）下无法自校验：请先落盘再执行"
+            die "$EX_USAGE" "通过管道执行时无法使用 --pinned-sha256：请先下载 install.sh 再执行"
         fi
         _rt_i_selfsha=$(sha256_of "$0" || true)
         if [ "$_rt_i_selfsha" != "$RT_PINNED" ]; then
-            die "$EX_CHECKSUM" "install.sh 自身 sha256 不匹配：期望 $RT_PINNED，实际 $_rt_i_selfsha"
+            die "$EX_CHECKSUM" "install.sh 的 SHA256 不匹配：期望 $RT_PINNED，实际 $_rt_i_selfsha"
         fi
-        ok "install.sh 自身 sha256 校验通过"
+        detail "install.sh 的 SHA256 校验通过"
     fi
     lock_acquire
 
     # --- 步骤 1：环境预检 ---
-    say "[1/8] 环境预检"
+    detail "[1/8] 检查安装环境"
     if ! detect_arch; then
-        die "$EX_PLATFORM" "不支持的架构：$(uname -m)（支持 x86_64/amd64 与 aarch64/arm64，可自行交叉编译后 --agent-src 安装）"
+        die "$EX_PLATFORM" "不支持的架构：$(uname -m)（支持 x86_64/amd64 和 aarch64/arm64，也可交叉编译后用 --agent-src 安装）"
     fi
     RT_ARCH=$RT_ARCH_OUT
     if [ "$RT_SCOPE" = system ] && [ "$RT_EUID" != 0 ]; then
-        say "  提权方式：sudo --sudo $RT_SUDO_MODE"
+        detail "安装器提权方式：sudo（$RT_SUDO_MODE）"
     fi
     if [ "$RT_SCOPE" = system ]; then
         priv mkdir -p "$RT_BIN_DIR" || die "$EX_FAIL" "无法创建 $RT_BIN_DIR"
@@ -1857,21 +1862,21 @@ cmd_install() {
     fi
     case ":$PATH:" in
         *":$RT_BIN_DIR:"*) : ;;
-        *) warn "$RT_BIN_DIR 不在当前 PATH 中，安装后请用绝对路径或把它加入 PATH" ;;
+        *) warn "若安装后找不到 $RT_NAME，请将 $RT_BIN_DIR 加入 PATH" ;;
     esac
-    ok "平台 $(uname -s)/$RT_ARCH，scope=$RT_SCOPE"
+    detail "平台：$(uname -s)/$RT_ARCH；安装范围：$RT_SCOPE"
 
     # --- 已装则先停服务、保留既有 token ---
     _rt_i_prev_scope=''
     if [ -f "$RT_STATE_FILE" ]; then
         _rt_i_prev_scope=$(sed -n 's/^SCOPE=//p' "$RT_STATE_FILE" 2>/dev/null | head -n1 || true)
         if [ -n "$_rt_i_prev_scope" ] && [ "$_rt_i_prev_scope" != "$RT_SCOPE" ]; then
-            die "$EX_CONFLICT" "已安装为 scope=$_rt_i_prev_scope，与本次 scope=$RT_SCOPE 冲突；先 $RT_NAME uninstall 再改 scope"
+            die "$EX_CONFLICT" "安装范围冲突：已安装为 $_rt_i_prev_scope，本次指定 $RT_SCOPE；请先执行 $RT_NAME uninstall"
         fi
         load_state
-        say "检测到既有安装（$RT_STATE_FILE），执行幂等升级式安装"
+        detail "检测到既有安装，将保留配置和 token"
         if svc_active; then
-            svc_stop || die "$EX_SERVICE" "停止既有服务失败，已中止（避免半安装）"
+            svc_stop || die "$EX_SERVICE" "无法停止现有服务，安装已中止"
         fi
     else
         RT_INIT=$(detect_init)
@@ -1879,59 +1884,63 @@ cmd_install() {
     [ -n "$RT_INIT" ] || RT_INIT=$(detect_init)
 
     # --- 步骤 2：解析版本 ---
-    say "[2/8] 解析版本"
+    detail "[2/8] 确定目标版本"
     resolve_release_tag
     RT_TAG=$RT_TAG_OUT
-    ok "目标版本：$RT_TAG"
+    _rt_i_scope_name='系统级'
+    if [ "$RT_SCOPE" = user ]; then _rt_i_scope_name='用户级'; fi
+    info "安装 $RT_TAG（Linux/$RT_ARCH，${_rt_i_scope_name}安装）"
 
     # --- 步骤 3/4：下载与校验 ---
-    say "[3/8] 下载二进制与校验清单"
+    detail "[3/8] 下载安装文件"
     if [ -n "$RT_AGENT_SRC" ]; then
         [ -f "$RT_AGENT_SRC" ] || die "$EX_DOWNLOAD" "--agent-src 文件不存在：$RT_AGENT_SRC"
         RT_DL_AGENT=$RT_AGENT_SRC
         RT_DL_CLIENT=''
         RT_DL_SCRIPT=''
         RT_AGENT_SHA256=$(sha256_of "$RT_AGENT_SRC" || true)
-        warn "使用本地二进制（--agent-src），跳过 SHA256 清单校验"
+        warn "使用本地 agent，未进行发布清单校验"
     else
         fetch_assets "$RT_TAG" "$RT_ARCH"
         RT_AGENT_SHA256=$(sha256_of "$RT_DL_AGENT" || true)
     fi
-    say "[4/8] 校验 SHA256"
+    detail "[4/8] 校验 SHA256"
     if [ -z "$RT_AGENT_SHA256" ]; then
-        die "$EX_CHECKSUM" "无法计算 agent 的 sha256（缺少校验工具）"
+        die "$EX_CHECKSUM" "无法计算 agent 的 SHA256，请检查校验工具"
     fi
     _rt_i_sha16=$(printf '%s' "$RT_AGENT_SHA256" | cut -c1-16 || true)
-    ok "agent sha256=${_rt_i_sha16}…"
+    detail "agent SHA256：${_rt_i_sha16}…"
+    if [ -z "$RT_AGENT_SRC" ]; then ok "安装文件已下载并通过 SHA256 校验"; fi
 
     # --- 步骤 5/6：停旧服务 + 原子替换 ---
-    say "[5/8] 落盘二进制与脚本（原子替换）"
+    detail "[5/8] 安装二进制和管理命令"
+    info '正在安装文件并配置服务…'
     _rt_i_owner=''
     if [ "$RT_SCOPE" = system ]; then _rt_i_owner='root:root'; fi
     install_one_binary "$RT_DL_AGENT" "$RT_BIN_AGENT" "$_rt_i_owner"
-    ok "agent 已安装：$RT_BIN_AGENT"
+    detail "agent 已安装：$RT_BIN_AGENT"
     if [ -n "$RT_DL_CLIENT" ]; then
         install_one_binary "$RT_DL_CLIENT" "$RT_BIN_CLIENT" "$_rt_i_owner"
-        ok "客户端已安装：$RT_BIN_CLIENT（本机自检探针用）"
+        detail "客户端已安装：$RT_BIN_CLIENT"
     elif [ -x "$RT_BIN_CLIENT" ]; then
-        hint "沿用既有客户端：$RT_BIN_CLIENT"
+        detail "沿用既有客户端：$RT_BIN_CLIENT"
     fi
     _rt_i_selfsrc=$(self_script_source || true)
     if [ -n "$_rt_i_selfsrc" ]; then
         install_one_binary "$_rt_i_selfsrc" "$RT_BIN_DIR/$RT_NAME" "$_rt_i_owner"
-        ok "管理脚本已安装：$RT_BIN_DIR/$RT_NAME"
+        detail "管理命令已安装：$RT_BIN_DIR/$RT_NAME"
     else
-        warn "无法确定脚本本体来源（管道执行且未取到 install.sh 资产）：请手动 cp 本脚本到 $RT_BIN_DIR/$RT_NAME"
+        warn "无法安装管理命令：请将 install.sh 复制为 $RT_BIN_DIR/$RT_NAME"
     fi
     probe_agent_caps "$RT_BIN_AGENT"
     RT_AGENT_VERSION=$(agent_version_of "$RT_BIN_AGENT")
 
     # --- 步骤 7：运行用户、目录、配置、服务单元 ---
-    say "[6/8] 创建运行用户与配置"
+    detail "[6/8] 准备运行用户和配置"
     ensure_run_user
     if [ "$RT_SCOPE" = system ]; then
         priv install -d -m 0750 -o root -g "$RT_RUN_GROUP" "$RT_CONF_DIR" \
-            || die "$EX_FAIL" "创建 $RT_CONF_DIR 失败（必须先于 -init，否则 agent 的 MkdirAll 0700 会让 rtctl 读不到配置）"
+            || die "$EX_FAIL" "创建配置目录失败：$RT_CONF_DIR"
         priv install -d -m 0755 -o root -g root "$RT_STATE_DIR" 2>/dev/null || true
     else
         mkdir -p "$RT_CONF_DIR" 2>/dev/null || true
@@ -1949,9 +1958,9 @@ cmd_install() {
         RT_TLS_CERT_STATE=$_rt_i_cert
         _rt_i_as=$(conf_read_key allow_sudo)
         case "$_rt_i_as" in true|1|yes|TRUE|True) RT_ALLOW_SUDO_STATE=1 ;; *) RT_ALLOW_SUDO_STATE=0 ;; esac
-        say "  保留既有端口 $RT_PORT_STATE（端口只在首次安装生成，重启不变）"
+        detail "保留既有端口：$RT_PORT_STATE"
         if [ -n "$RT_PORT" ] || [ -n "$RT_LISTEN" ]; then
-            warn "既有配置里的 listen=$RT_LISTEN_STATE 生效，忽略本次 --port/--listen；改端口请用 $RT_NAME config set listen :<新端口> --restart"
+            warn "已忽略 --port/--listen，继续使用 listen=$RT_LISTEN_STATE；修改请执行 $RT_NAME config set listen :<新端口> --restart"
         fi
     else
         pick_port
@@ -1975,7 +1984,7 @@ cmd_install() {
         RT_TLS_CERT_STATE=''
         RT_ALLOW_SUDO_STATE=0
         if [ "$RT_ALLOW_SUDO" = 1 ]; then RT_ALLOW_SUDO_STATE=1; fi
-        ok "随机端口：$RT_PORT_STATE（ss/netstat//proc/net/tcp 三路检测已避开占用与黑名单）"
+        detail "已选择可用端口：$RT_PORT_STATE"
     fi
 
     if [ "$RT_TLS_GEN" = 1 ]; then
@@ -1989,7 +1998,7 @@ cmd_install() {
         [ -n "$RT_TLS_KEY" ] || die "$EX_USAGE" "--tls-cert 必须与 --tls-key 一起给出"
         [ -f "$RT_TLS_KEY" ] || die "$EX_USAGE" "--tls-key 文件不存在：$RT_TLS_KEY"
         if ! tls_verify_pair "$RT_TLS_CERT" "$RT_TLS_KEY"; then
-            die "$EX_FAIL" "证书与私钥不匹配（modulus 哈希不一致）"
+            die "$EX_FAIL" "TLS 证书与私钥不匹配"
         fi
         RT_TLS_CERT_STATE=$RT_TLS_CERT
         RT_TLS_KEY_STATE=$RT_TLS_KEY
@@ -2012,7 +2021,7 @@ cmd_install() {
         fi
     fi
 
-    say "[7/8] 安装服务单元（后端：$RT_INIT）"
+    detail "[7/8] 配置 $RT_INIT 服务"
     if [ "$RT_INIT" = systemd ] && [ "$RT_SCOPE" = user ]; then
         priv mkdir -p "$(dirname "$RT_UNIT")" 2>/dev/null || true
     fi
@@ -2020,28 +2029,28 @@ cmd_install() {
     svc_daemon_reload
 
     # --- 步骤 8：防火墙、启动、健康检查 ---
-    say "[8/8] 放行防火墙并启动"
+    detail "[8/8] 配置防火墙并启动服务"
     if [ "$RT_NO_FIREWALL" = 1 ]; then
-        hint "--no-firewall：跳过放行（请自行确认 $RT_PORT_STATE/tcp 可达）"
+        detail "已按 --no-firewall 跳过防火墙配置，请确认 $RT_PORT_STATE/tcp 可达"
         RT_FW_APPLIED=false
         RT_FW_BACKEND='none'
     elif [ "${RT_FW_APPLIED:-false}" = true ] && [ "${RT_FW_RULE:-}" != '' ] \
         && [ "$(state_get PORT)" = "$RT_PORT_STATE" ]; then
-        hint "既有防火墙规则已覆盖 $RT_PORT_STATE/tcp，跳过重复放行"
+        detail "既有防火墙规则已覆盖 $RT_PORT_STATE/tcp"
     else
         fw_apply "$RT_PORT_STATE"
     fi
     if ! svc_start; then
         RT_LAST_ERROR='start failed'
         err "服务启动失败"
-        hint "排错：$RT_NAME logs    状态：$RT_NAME status"
+        hint "查看日志：$RT_NAME logs    查看状态：$RT_NAME status"
         state_write || true
         exit "$EX_SERVICE"
     fi
     if ! health_check "$RT_LISTEN_STATE"; then
         RT_LAST_ERROR='healthz failed'
-        warn "健康检查未通过（$RT_LISTEN_STATE /healthz 无响应）"
-        hint "排错：$RT_NAME logs ；也可能是防火墙/端口冲突"
+        warn "健康检查未通过：$RT_LISTEN_STATE/healthz 无响应"
+        hint "请执行 $RT_NAME logs，并检查防火墙和端口占用"
         state_write || true
         exit "$EX_HEALTH"
     fi
@@ -2050,7 +2059,7 @@ cmd_install() {
     RT_TOKEN_FP=$(fingerprint_of "$(token_value 2>/dev/null || printf '')")
     RT_LAST_UPGRADE_RESULT='ok'
     state_write
-    ok "安装完成：$RT_BIN_AGENT（$RT_AGENT_VERSION），监听 $RT_LISTEN_STATE"
+    ok "安装完成：rtctl-agent $RT_AGENT_VERSION"
     print_guidance
     log_line "action=install result=ok listen=$RT_LISTEN_STATE port=$RT_PORT_STATE tls=$RT_TLS_ENABLED allow_sudo=$RT_ALLOW_SUDO_STATE"
     return 0
@@ -2099,23 +2108,23 @@ cmd_init() {
 
 cmd_start() {
     state_require
-    svc_start || die "$EX_SERVICE" "启动失败，排错：$RT_NAME logs"
+    svc_start || die "$EX_SERVICE" "服务启动失败，请执行 $RT_NAME logs 查看日志"
     ok "服务已启动"
     log_line 'action=start result=ok'
 }
 
 cmd_stop() {
     state_require
-    svc_stop || die "$EX_SERVICE" "停止失败（未执行 kill -9，请人工确认）"
-    ok "服务已停止（agent 退出码可能为 1，属正常：ServeStandalone 返回 ErrServerClosed）"
+    svc_stop || die "$EX_SERVICE" "服务停止失败，请检查进程状态"
+    ok "服务已停止"
     log_line 'action=stop result=ok'
 }
 
 cmd_restart() {
     state_require
-    svc_restart || die "$EX_SERVICE" "重启失败，排错：$RT_NAME logs"
+    svc_restart || die "$EX_SERVICE" "服务重启失败，请执行 $RT_NAME logs 查看日志"
     if ! health_check "$RT_LISTEN_STATE"; then
-        die "$EX_HEALTH" "重启后健康检查未通过，排错：$RT_NAME logs"
+        die "$EX_HEALTH" "重启后健康检查未通过，请执行 $RT_NAME logs 查看日志"
     fi
     ok "服务已重启并通过健康检查"
     log_line 'action=restart result=ok'
@@ -2180,10 +2189,10 @@ cmd_logs() {
 
 cmd_enable() {
     state_require
-    if svc_enabled; then info "开机自启已启用（幂等）"; return 0; fi
+    if svc_enabled; then info "开机自启已启用"; return 0; fi
     svc_enable || die "$EX_SERVICE" "启用开机自启失败"
     if [ "$RT_AUTOSTART" = none ]; then
-        warn "当前环境无法设置开机自启（无 init 且无 crond）"
+        warn "当前环境无法设置开机自启：未找到支持的 init 或 cron"
     else
         ok "开机自启已启用（$RT_AUTOSTART）"
     fi
@@ -2193,7 +2202,7 @@ cmd_enable() {
 
 cmd_disable() {
     state_require
-    if ! svc_enabled; then info "开机自启已禁用（幂等）"; return 0; fi
+    if ! svc_enabled; then info "开机自启已禁用"; return 0; fi
     svc_disable || die "$EX_SERVICE" "禁用开机自启失败"
     ok "开机自启已禁用"
     state_write || true
@@ -2237,9 +2246,9 @@ cmd_upgrade() {
         if [ -n "$RT_BASE_URL" ]; then _rt_u_args="$_rt_u_args --base-url $RT_BASE_URL"; fi
         if [ -n "$RT_PROXY" ]; then _rt_u_args="$_rt_u_args --proxy $RT_PROXY"; fi
         # shellcheck disable=SC2086
-        detach_run /bin/sh "$0" $_rt_u_args || die "$EX_SERVICE" "无法脱离调用者执行升级"
-        ok "升级已在后台脱离当前进程执行（避免经 rtctl exec 升级时把自己掐死）"
-        say "查看进度：$RT_NAME logs    /    tail -f $RT_LOG_FILE"
+        detach_run /bin/sh "$0" $_rt_u_args || die "$EX_SERVICE" "无法启动后台升级"
+        ok "升级已在后台启动，当前会话可以安全退出"
+        say "查看进度：$RT_NAME logs    安装日志：tail -f $RT_LOG_FILE"
         return 0
     fi
     lock_acquire
@@ -2469,7 +2478,7 @@ cmd_config() {
                 ;;
             esac
             if [ "$(conf_read_key "$_rt_cf_key")" = "$_rt_cf_rest" ]; then
-                say "值未变化（幂等）：$_rt_cf_key"
+                say "配置值未变化：$_rt_cf_key"
                 return 0
             fi
             [ "$RT_SCOPE" = system ] && require_root_or_die
@@ -2563,28 +2572,30 @@ probe_token_ok() {
 cmd_token() {
     _rt_tk_sub=${RT_SUB:-show}
     state_require
+    _rt_tk_rt=$RT_NAME
+    if [ "$RT_SCOPE" = system ] && [ "$RT_EUID" != 0 ]; then _rt_tk_rt="sudo $RT_NAME"; fi
     case "$_rt_tk_sub" in
         show)
             _rt_tk=$(token_value || true)
             if [ -z "$_rt_tk" ]; then
-                die "$EX_CONFLICT" "无法读取 token（配置缺失或无权限）：sudo $RT_NAME token show --reveal"
+                die "$EX_CONFLICT" "无法读取 token，请检查配置和权限：$_rt_tk_rt token show --reveal"
             fi
             if [ "$RT_REVEAL" = 1 ]; then
                 if [ ! -t 1 ] && [ "$RT_FORCE" != 1 ]; then
-                    die "$EX_NOSECRET" "拒绝在非终端输出完整 token（如确需请加 --force，并确认输出不会进日志/CI）"
+                    die "$EX_NOSECRET" "非交互输出默认隐藏完整 token；确认不会写入日志后，可使用 --force"
                 fi
                 if [ "$RT_FORCE" = 1 ]; then
-                    warn "--force：完整 token 已输出，请勿重定向到文件或日志"
+                    warn "完整 token 将输出，请勿写入文件、日志或 CI"
                 fi
                 say "token = $_rt_tk"
-                say "fingerprint = $(fingerprint_of "$_rt_tk")"
-                warn "token 即设备全部权限，勿贴群聊、工单、截图、CI 日志"
+                say "指纹 = $(fingerprint_of "$_rt_tk")"
+                warn "token 可用于远程执行命令和传输文件，请勿泄露"
             else
                 say "token = $(mask_token "$_rt_tk")"
-                say "fingerprint = $(fingerprint_of "$_rt_tk")"
-                say "length = ${#_rt_tk}"
+                say "指纹 = $(fingerprint_of "$_rt_tk")"
+                say "长度 = ${#_rt_tk}"
                 say "来源 = $RT_CONF"
-                hint "完整值：sudo $RT_NAME token show --reveal   （需交互终端）"
+                hint "查看完整 token：$_rt_tk_rt token show --reveal（需交互终端）"
             fi
             ;;
         reset)
@@ -2607,33 +2618,38 @@ cmd_token() {
                 _rt_tr_new=$(od -An -tx1 -N32 </dev/urandom 2>/dev/null | tr -d ' \n' || true)
             fi
             if [ -z "$_rt_tr_new" ]; then
-                die "$EX_FAIL" "无法生成新 token（缺 openssl 与 /dev/urandom）"
+                die "$EX_FAIL" "无法生成新 token，请检查 openssl 和 /dev/urandom"
             fi
             conf_set_key token "$_rt_tr_new"
             if ! svc_restart; then
-                warn "重启失败，回滚配置"
+                warn "重启失败，正在恢复原 token"
                 priv cp -p "$_rt_tr_bak" "$RT_CONF" || true
                 conf_finish_perms "$RT_CONF"
                 svc_restart >/dev/null 2>&1 || true
-                die "$EX_SERVICE" "token 轮换失败，已回滚（旧 token 仍有效）"
+                die "$EX_SERVICE" "token 轮换失败，已恢复原 token"
             fi
             _rt_tr_newtok=$(token_value || true)
             if probe_token_ok "$_rt_tr_newtok"; then
-                ok "新 token 探针通过"
+                ok "新 token 验证通过"
             else
                 _rt_tr_prc=$?
                 case "$_rt_tr_prc" in
-                    2) warn "缺少本机客户端 $RT_BIN_CLIENT，跳过双探针" ;;
-                    3) warn "已启用 TLS 且客户端走系统信任库，跳过本机双探针（请在控制机手工验证）" ;;
-                    *) warn "新 token 探针失败（可能健康检查未就绪），请手工验证" ;;
+                    2) warn "缺少本机客户端，未自动验证新 token，请在控制机验证" ;;
+                    3) warn "使用自签 TLS 时无法自动验证新 token，请在控制机验证" ;;
+                    *) warn "新 token 自动验证失败，请在控制机确认连接" ;;
                 esac
             fi
             if [ -n "$_rt_tr_old" ] && probe_token_ok "$_rt_tr_old"; then
-                warn "旧 token 仍然可用：请确认 agent 已真正重启"
+                warn "旧 token 仍然可用，请确认 agent 已重启"
             fi
-            say "新 token = $(mask_token "$_rt_tr_newtok")  fingerprint=$(fingerprint_of "$_rt_tr_newtok")"
-            hint "完整值：sudo $RT_NAME token show --reveal"
-            hint "备份（含旧 token，0600）：$_rt_tr_bak；销毁：sudo shred -u $_rt_tr_bak"
+            say "新 token = $(mask_token "$_rt_tr_newtok")  指纹=$(fingerprint_of "$_rt_tr_newtok")"
+            hint "查看完整 token：$_rt_tk_rt token show --reveal"
+            hint "备份包含旧 token：$_rt_tr_bak"
+            if [ "$RT_SCOPE" = system ]; then
+                hint "删除备份：sudo shred -u $_rt_tr_bak"
+            else
+                hint "删除备份：shred -u $_rt_tr_bak"
+            fi
             log_line 'action=token.reset result=ok'
             ;;
         *)
@@ -2676,22 +2692,25 @@ cmd_sudo() {
     case "$_rt_sd_sub" in
         enable)
             if [ -f "$RT_SUDOERS_AGENT" ] && [ "${RT_TEMP:-0}" != 1 ]; then
-                info "$RT_SUDOERS_AGENT 已存在（幂等）"
+                info "永久授权规则已存在：$RT_SUDOERS_AGENT"
             fi
             if [ "${RT_TEMP:-0}" = 1 ]; then
                 conf_set_key allow_sudo true
                 RT_ALLOW_SUDO_STATE=1
                 render_unit "$(conf_read_key listen)" "$(conf_read_key ws_path)" 1
                 svc_daemon_reload
-                svc_restart >/dev/null 2>&1 || warn "重启失败，请手动 $RT_NAME restart"
-                ok "已开启临时授权（allow_sudo=true，不写 sudoers）"
-                hint "控制端用法：rtctl -server ... exec -token <token> -sudo -c 'systemctl restart nginx'"
-                hint "客户端会当场询问 root 密码，agent 用 sudo -S 从 stdin 读取（协议字段 sudo_password），密码不落盘"
+                svc_restart >/dev/null 2>&1 || warn "服务重启失败，请执行 $RT_NAME restart"
+                ok "已开启临时远程 sudo，未写入 sudoers"
+                hint "控制端：rtctl -server <地址> exec -token <token> -sudo -sudo-ask -c 'systemctl restart nginx'"
+                hint 'root 密码仅用于本次提权，不写入配置'
+                if [ "${RT_TLS_ENABLED:-false}" != true ]; then
+                    warn '当前未启用 TLS，root 密码可能在网络中被截获'
+                fi
                 return 0
             fi
-            warn "永久授权：执行后任何持有本机 token 的人都能获得 root"
+            warn "永久授权后，任何持有本机 token 的人都能免密码获得 root"
             if [ "$RT_YES" != 1 ]; then
-                if ! ask_yn '确认写入 NOPASSWD sudoers？' 'n'; then say '已取消'; return 0; fi
+                if ! ask_yn '确认开启永久远程 sudo？' 'n'; then say '已取消'; return 0; fi
             fi
             write_sudoers "$RT_SUDOERS_AGENT" \
                 "$RT_RUN_USER ALL=(ALL) NOPASSWD: /bin/sh, /usr/bin/sh, /usr/bin/kill, /bin/kill"
@@ -2699,8 +2718,8 @@ cmd_sudo() {
             RT_ALLOW_SUDO_STATE=1
             render_unit "$(conf_read_key listen)" "$(conf_read_key ws_path)" 1
             svc_daemon_reload
-            svc_restart >/dev/null 2>&1 || warn "重启失败，请手动 $RT_NAME restart"
-            ok "已开启永久授权（sudoers + allow_sudo=true，NoNewPrivileges=no）"
+            svc_restart >/dev/null 2>&1 || warn "服务重启失败，请执行 $RT_NAME restart"
+            ok "已开启永久远程 sudo，token 持有者可免密码获得 root"
             log_line 'action=sudo.enable result=ok mode=permanent'
             ;;
         temp)
@@ -2711,48 +2730,51 @@ cmd_sudo() {
         disable)
             if [ -f "$RT_SUDOERS_AGENT" ]; then
                 priv rm -f "$RT_SUDOERS_AGENT" || warn "删除 $RT_SUDOERS_AGENT 失败"
-                ok "已删除 $RT_SUDOERS_AGENT"
-            else
-                info "$RT_SUDOERS_AGENT 不存在（幂等）"
+                detail "已删除 $RT_SUDOERS_AGENT"
             fi
             conf_set_key allow_sudo false
             RT_ALLOW_SUDO_STATE=0
             render_unit "$(conf_read_key listen)" "$(conf_read_key ws_path)" 0
             svc_daemon_reload
-            svc_restart >/dev/null 2>&1 || warn "重启失败，请手动 $RT_NAME restart"
-            ok "已关闭提权（allow_sudo=false，NoNewPrivileges=yes）"
+            svc_restart >/dev/null 2>&1 || warn "服务重启失败，请执行 $RT_NAME restart"
+            ok "已关闭远程 sudo"
             log_line 'action=sudo.disable result=ok'
             ;;
         status)
             _rt_sd_as=$(conf_read_key allow_sudo)
+            _rt_sd_state='关闭'
+            case "$_rt_sd_as" in true|TRUE|True|1) _rt_sd_state='开启' ;; esac
             hr
-            say "agent 层 allow_sudo = ${_rt_sd_as:-<空>}"
+            say "远程 sudo : $_rt_sd_state"
             if [ -f "$RT_SUDOERS_AGENT" ]; then
-                say "永久授权 sudoers = 存在（$RT_SUDOERS_AGENT，$(priv stat -c '%a %U:%G' "$RT_SUDOERS_AGENT" 2>/dev/null || printf '?')）"
-                warn "该规则等价于：token 持有者 = root"
+                say "永久授权 : 已启用（$RT_SUDOERS_AGENT）"
+                warn "当前 token 持有者可免密码获得 root"
             else
-                say "永久授权 sudoers = 不存在"
+                say "永久授权 : 未启用"
             fi
             if [ "$RT_INIT" = systemd ] && [ -f "$RT_UNIT" ]; then
-                say "unit NoNewPrivileges = $(sed -n 's/^NoNewPrivileges=//p' "$RT_UNIT" 2>/dev/null | head -n1 || printf '?')"
+                detail "NoNewPrivileges=$(sed -n 's/^NoNewPrivileges=//p' "$RT_UNIT" 2>/dev/null | head -n1 || printf '?')"
             fi
-            say "脚本层免密（$RT_SUDOERS_SCRIPT） = $(if [ -f "$RT_SUDOERS_SCRIPT" ]; then printf '存在'; else printf '不存在'; fi)"
+            say "安装器免密 sudo : $(if [ -f "$RT_SUDOERS_SCRIPT" ]; then printf '已配置'; else printf '未配置'; fi)"
             case "$_rt_sd_as" in
                 true|TRUE|True|1)
                     if [ -f "$RT_SUDOERS_AGENT" ]; then
-                        hint "当前是永久授权：远程 -sudo 不需要密码"
+                        hint "关闭永久授权：$RT_NAME sudo disable"
                     else
-                        hint "当前是临时授权：远程 -sudo 会提示输入 root 密码（agent 用 sudo -S 读取）"
+                        hint '临时授权客户端需同时使用 -sudo 和 -sudo-ask'
+                        if [ "${RT_TLS_ENABLED:-false}" != true ]; then
+                            warn '当前未启用 TLS，临时授权输入的 root 密码可能在网络中被截获'
+                        fi
                     fi
                     ;;
                 *)
-                    hint "当前关闭提权：远程 -sudo 返回 sudo_disabled；开启：$RT_NAME sudo enable（永久） 或 $RT_NAME sudo temp（临时）"
+                    hint "临时开启：$RT_NAME sudo temp    永久开启：$RT_NAME sudo enable"
                     ;;
             esac
             hr
             ;;
         *)
-            die "$EX_USAGE" "用法：$RT_NAME sudo enable|temp|disable|status"
+            die "$EX_USAGE" "用法：$RT_NAME sudo status|temp|enable|disable"
             ;;
     esac
     return 0
@@ -3002,31 +3024,58 @@ cmd_version() {
 }
 
 cmd_help() {
-    say "rtctl $RT_VERSION —— Linux 安装与管理脚本（安装后命令名 rt）"
+    say "rtctl $RT_VERSION —— Linux 安装与管理（命令：$RT_NAME）"
     say ''
-    say "用法: $RT_NAME <命令> [子命令] [选项]"
+    say "用法：$RT_NAME <命令> [子命令] [选项]"
     say ''
-    printf '%-10s %-8s %-6s %s\n' '命令' '风险' '需root' '说明'
-    hr
-    rt_cmd_table | while IFS="$RT_TAB" read -r _rt_h_name _rt_h_handler _rt_h_risk _rt_h_root _rt_h_desc; do
-        [ -n "$_rt_h_name" ] || continue
-        printf '%-10s %-8s %-6s %s\n' "$_rt_h_name" "$_rt_h_risk" "$_rt_h_root" "$_rt_h_desc"
-    done
-    hr
-    say '全局选项: --scope system|user  --prefix DIR  --yes  --json  --quiet  --verbose'
-    say '安装选项: --port N  --listen ADDR  --id NAME  --ws-path /rt/ws  --tls-generate'
-    say '          --tls-cert FILE --tls-key FILE  --allow-sudo  --sudo ask|nopasswd'
-    say '          --proxy-domain DOMAIN  --base-url URL  --release vX.Y.Z  --agent-src FILE'
-    say '          --pinned-sha256 HEX  --no-firewall  --allow-from CIDR  --proxy URL  --init systemd|openrc|nohup'
+    say '常用命令：'
+    say '  install       安装或覆盖升级，保留既有配置和 token'
+    say '  status        查看服务、端口和版本'
+    say '  connect       查看连接信息和客户端命令'
+    say '  logs          查看日志，-f 持续跟随'
+    say '  doctor        检查安装与安全配置'
     say ''
-    say '退出码: 0 成功 | 1 通用失败 | 2 用法错误 | 3 平台/架构不支持 | 4 下载失败 | 5 校验失败'
-    say '        6 权限不足 | 7 服务操作失败 | 8 配置冲突 | 9 健康检查失败(已回滚) | 10 doctor 未通过'
-    say '        11 功能未实现 | 12 拒绝在非终端输出敏感内容 | 75 锁被占用'
+    say '服务管理：'
+    say '  start | stop | restart    启动、停止或重启服务'
+    say '  enable | disable          启用或关闭开机自启'
+    say '  upgrade                   升级，失败时回滚'
+    say '  uninstall                 卸载；--purge 同时删除配置和 token'
     say ''
-    say "示例: $RT_NAME install --tls-generate        # 安装（自签 TLS + 随机端口）"
-    say "      $RT_NAME token show --reveal           # 查看完整 token（需交互终端）"
-    say "      $RT_NAME proxy nginx                   # 生成反向代理模板"
-    say "      $RT_NAME doctor                        # 自检"
+    say '配置与安全：'
+    say '  config show | get | set | edit    查看或修改配置'
+    say '  token show [--reveal] | reset     查看或轮换 token'
+    say '  sudo status | temp | enable | disable    管理远程 sudo'
+    say '  proxy nginx | caddy               生成反向代理配置'
+    say '  init                              仅生成配置和 token'
+    say '  version                           查看版本信息'
+    say ''
+    say '常用选项：'
+    say '  --scope system|user    系统级或用户级安装'
+    say '  --tls-generate         生成自签 CA 和服务器证书'
+    say '  --no-print-token       安装完成时不显示完整 token'
+    say '  --yes  --quiet  --verbose'
+    say ''
+    say "示例：$RT_NAME install --tls-generate"
+    say "      $RT_NAME token show --reveal"
+    say "      $RT_NAME sudo status"
+    if [ "$RT_VERBOSE" != 1 ]; then
+        say ''
+        say "完整选项和退出码：$RT_NAME help --verbose"
+        return 0
+    fi
+    say ''
+    say '完整选项（按命令支持）：'
+    say '  --prefix DIR  --port N  --listen ADDR  --id NAME  --ws-path /rt/ws'
+    say '  --tls-cert FILE --tls-key FILE  --allow-sudo  --sudo ask|nopasswd'
+    say '  --proxy-domain DOMAIN  --base-url URL  --release vX.Y.Z  --agent-src FILE'
+    say '  --pinned-sha256 HEX  --no-firewall  --allow-from CIDR  --proxy URL'
+    say '  --init systemd|openrc|nohup  --json'
+    say ''
+    say '退出码：'
+    say '  0 成功；1 通用失败；2 用法错误；3 平台不支持；4 下载失败；5 校验失败'
+    say '  6 权限不足；7 服务操作失败；8 配置冲突；9 健康检查失败；10 自检未通过'
+    say '  11 功能未实现；12 拒绝输出敏感内容；75 另一个安装或升级正在进行'
+    print_sudo_guide
     return 0
 }
 
@@ -3054,7 +3103,7 @@ disable	cmd_disable	mid	yes	关闭开机自启
 upgrade	cmd_upgrade	high	yes	停服务 -> 原子替换 -> 健康检查 -> 失败回滚
 uninstall	cmd_uninstall	high	yes	卸载（默认保留配置，--purge 才销毁）
 config	cmd_config	mid	yes	配置 show/get/set/edit（token 键一律拒绝）
-token	cmd_token	mid	yes	token show（默认 masked）/ reset（双探针）
+token	cmd_token	mid	yes	查看或轮换 token
 sudo	cmd_sudo	high	yes	提权授权 enable/temp/disable/status
 proxy	cmd_proxy	low	no	反向代理与路径前缀模板 nginx/caddy
 doctor	cmd_doctor	low	no	只读自检（有 fail -> exit 10）

@@ -2,7 +2,7 @@
 
 [最新版本](https://github.com/GotKiCry/rtctl/releases/latest) · [变更记录](CHANGELOG.md) · [开发说明](CONTRIBUTING.md) · [安全政策](SECURITY.md) · [MIT 许可证](LICENSE)
 
-> **安全提示：rtctl 等同于远程 Shell。token 即设备全部权限；公网或共享网络必须启用 TLS。只应在可信设备上安装 agent。**
+> **安全提示：rtctl 等同于远程 Shell。token 可以 agent 用户身份执行命令和传输文件；永久 sudo 还会开放 root。只应在可信设备上安装 agent，公网或共享网络必须启用 TLS。**
 
 ## 功能
 
@@ -41,21 +41,21 @@ sh /tmp/rt-install.sh install --scope user
 
 安装脚本会下载并校验对应架构的二进制，生成随机端口和 token，配置服务并执行健康检查。系统级安装创建专用 `rtctl` 用户；用户级安装使用当前用户。
 
-防火墙仅在 root 或免密 `sudo` 可用时自动配置；其他环境不会修改防火墙，只检查端口是否可连通。
+默认只显示安装结果、连接信息和安全提示；添加 `--verbose` 可查看下载地址、哈希和服务单元等技术细节。
+
+防火墙仅在 root 或免密 `sudo` 可用时自动配置；其他环境不会修改防火墙。安装器仍会执行本机健康检查，控制机无法连接时需手动放行端口。
 
 ### 2. 获取连接信息
 
-系统级安装：
+安装完成后会显示地址、token 和客户端命令。之后可随时重新查看：
 
 ```bash
-sudo rt status
+# 系统级安装
+sudo rt connect
 sudo rt token show --reveal
-```
 
-用户级安装无需 `sudo`：
-
-```bash
-rt status
+# 用户级安装
+rt connect
 rt token show --reveal
 ```
 
@@ -132,7 +132,7 @@ sudo rt uninstall              # 默认保留配置和 token
 ```bash
 ./rtctl-agent -init            # 生成 ~/.rtctl/agent.conf 和随机 token
 ./rtctl-agent                  # 默认后台启动，监听就绪后返回
-./rtctl-agent -status          # 查看状态
+./rtctl-agent -status          # 查看状态及设备 token（-print-token=false 隐藏）
 ./rtctl-agent -logs -follow    # 跟随日志
 ./rtctl-agent -stop            # 停止后台实例
 ```

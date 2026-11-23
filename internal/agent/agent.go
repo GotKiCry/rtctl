@@ -107,7 +107,7 @@ func writePump(ws *websocket.Conn, send chan []byte) {
 type sendSink interface {
 	Send(proto.Msg) error
 	SendBlocking(proto.Msg, time.Duration) error
-	CloseConn() // 关键帧送达失败时断开对应连接
+	CloseConn()         // 关键帧送达失败时断开对应连接
 	RemoteAddr() string // 对端地址（IP:port）
 	ClientID() string   // 客户端 auth 时声明的操作者标识（可为空）
 }
@@ -173,7 +173,7 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 	// Windows 例外：计划任务本身以 SYSTEM 运行，sudo 字段无提权含义，直接放行。
 	if p.Sudo && !a.AllowSudo && runtime.GOOS != "windows" {
 		sendExecOutput(sink, m.ID, "", true, 1,
-			"特权命令未获批准：被控端未开启 -allow-sudo（需管理员在被控端运行安装脚本并选择允许提权）",
+			"远程 sudo 未开启：请在目标机执行 rt sudo temp（临时）或 rt sudo enable（永久）",
 			proto.ErrorCodeSudoDisabled, false)
 		return
 	}
@@ -313,8 +313,8 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 	case ctx.Err() == context.Canceled:
 		errStr, errCode = "已被取消", proto.ErrorCodeKilled
 	case p.Sudo && exitCode == 1 && sudoFailureMark(string(head)):
-		// sudo -n 失败（sudoers 未放行 / NNP 阻挡 / 密码缺失）→ 机器可读错误码
-		errStr, errCode = "sudo 执行失败：sudoers 未放行 rtctl-agent（需在被控端安装时选择允许提权）", proto.ErrorCodeSudoDenied
+		// sudo -n/-S 失败（授权、系统策略或密码问题）→ 机器可读错误码
+		errStr, errCode = "sudo 执行失败：请检查目标机的 sudoers 授权、系统策略或 root 密码", proto.ErrorCodeSudoDenied
 	}
 	// done 帧必须可靠送达：阻塞发送，失败则断开对应连接
 	if err := sendExecOutputBlocking(sink, m.ID, true, exitCode, errStr, errCode, truncated); err != nil {

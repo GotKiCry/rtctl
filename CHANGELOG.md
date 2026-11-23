@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `rtctl-agent -status` 默认显示当前设备 token，可通过 `-print-token=false` 隐藏，手工部署无需再直接读取配置文件。
+- 精简 Linux 安装、管理命令及客户端/agent 输出，实现细节移至 `--verbose`，帮助页按使用场景组织。
+- 修正临时 sudo 示例缺少 `-sudo-ask`、客户端下载命令缺少 `./` 的提示，并明确明文连接下的 root 密码风险。
+
 ## [1.0.1] - 2026-11-03
 
 ### Changed

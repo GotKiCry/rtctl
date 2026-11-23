@@ -22,7 +22,7 @@ import (
 func openFirewallPort(listen string) (firewallResult, error) {
 	_, port, err := net.SplitHostPort(listen)
 	if err != nil || port == "" {
-		return firewallResult{}, fmt.Errorf("无法解析监听地址端口: %s", listen)
+		return firewallResult{}, fmt.Errorf("无法解析监听地址中的端口：%s", listen)
 	}
 
 	switch {
@@ -32,7 +32,8 @@ func openFirewallPort(listen string) (firewallResult, error) {
 	case hasCmd("firewall-cmd"):
 		// firewalld：规则入永久库 + reload
 		if out, err := runFirewall("firewall-cmd", "--permanent", "--add-port="+port+"/tcp"); err != nil {
-			return failure(port, "firewall-cmd", fmt.Sprintf("firewall-cmd 放行失败: %s", strings.TrimSpace(out))), err
+			manual := fmt.Sprintf("sudo firewall-cmd --permanent --add-port=%s/tcp && sudo firewall-cmd --reload", port)
+			return failure(port, strings.TrimSpace(out), manual), err
 		}
 		_, _ = runFirewall("firewall-cmd", "--reload")
 		return firewallResult{summary: fmt.Sprintf("已放行 %s/tcp（firewalld）", port)}, nil
@@ -41,31 +42,26 @@ func openFirewallPort(listen string) (firewallResult, error) {
 			[]string{"-I", "INPUT", "-p", "tcp", "--dport", port, "-j", "ACCEPT"},
 			fmt.Sprintf("iptables -I INPUT -p tcp --dport %s -j ACCEPT", port))
 	default:
-		return firewallResult{summary: fmt.Sprintf("⚠ 未放行（未找到 ufw/firewall-cmd/iptables，请自行放行 %s/tcp）", port)}, nil
+		return firewallResult{summary: fmt.Sprintf("⚠ 未自动放行 %s/tcp，请手动配置防火墙", port)}, nil
 	}
 }
 
-// tryFirewallCmd 执行一条放行命令；失败时给出 sudoers 建议与手动命令。
+// tryFirewallCmd 执行一条放行命令；失败时给出手动命令。
 func tryFirewallCmd(port, bin string, args []string, manual string) (firewallResult, error) {
 	if out, err := runFirewall(bin, args...); err != nil {
-		return failure(port, bin, strings.TrimSpace(out)), err
+		return failure(port, strings.TrimSpace(out), "sudo "+manual), err
 	}
 	return firewallResult{summary: fmt.Sprintf("已放行 %s/tcp（%s）", port, bin)}, nil
 }
 
-// failure 生成失败摘要 + 详细建议（手动命令与 sudoers 配置）。
-func failure(port, bin, out string) firewallResult {
-	path := bin
-	if p, e := exec.LookPath(bin); e == nil {
-		path = p
+// failure 生成失败摘要与可执行的手动命令。
+func failure(port, out, manual string) firewallResult {
+	detail := "自动配置防火墙失败"
+	if out != "" {
+		detail += "：" + out
 	}
-	summary := fmt.Sprintf("⚠ 未放行（sudo %s ...）", bin)
-	detail := "自动放行防火墙失败：" + out + "\n"
-	detail += "  方案一：以 root 运行 agent\n"
-	detail += "  方案二：配置免密 sudo（sudo visudo 添加）：\n"
-	detail += fmt.Sprintf("    %s ALL=(ALL) NOPASSWD: %s\n", userOrRoot(), path)
-	detail += "  方案三：手动执行对应命令（见上方摘要）"
-	return firewallResult{summary: summary, detail: detail}
+	detail += "\n  请手动执行：" + manual
+	return firewallResult{summary: fmt.Sprintf("⚠ 未自动放行 %s/tcp", port), detail: detail}
 }
 
 // runFirewall 以 root 直接执行；普通用户用 sudo -n（免密）。
@@ -84,15 +80,4 @@ func runFirewall(bin string, args ...string) (string, error) {
 func hasCmd(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
-}
-
-// userOrRoot 取当前用户名（sudoers 建议用）。
-func userOrRoot() string {
-	if u := os.Getenv("USER"); u != "" {
-		return u
-	}
-	if u := os.Getenv("LOGNAME"); u != "" {
-		return u
-	}
-	return "<用户>"
 }

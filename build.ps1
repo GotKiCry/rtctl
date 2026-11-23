@@ -34,7 +34,7 @@ foreach ($t in $targets) {
   if ($LASTEXITCODE -ne 0) { throw "build rtctl ($($t.os)/$($t.arch)) failed" }
   & go build -trimpath -ldflags $ld -o (Join-Path $out ("rtctl-agent" + $suffix + $ext)) ./cmd/agent
   if ($LASTEXITCODE -ne 0) { throw "build rtctl-agent ($($t.os)/$($t.arch)) failed" }
-  Write-Host "built: rtctl$suffix$ext / rtctl-agent$suffix$ext  ($($t.os)/$($t.arch))"
+  Write-Host "已构建： rtctl$suffix$ext / rtctl-agent$suffix$ext  ($($t.os)/$($t.arch))"
 }
 
 # ---- install.sh：复制仓库根脚本并注入版本号（Release 资产之一，也是 README 一行自举的目标）----
@@ -46,7 +46,7 @@ $script = $script -replace '@@RTCTL_VERSION@@', $Version
 if ($script -match '@@') { throw 'install.sh 仍有未替换的 @@ 占位符' }
 $utf8NoBom = New-Object Text.UTF8Encoding $false
 [IO.File]::WriteAllText((Join-Path $out 'install.sh'), $script, $utf8NoBom)
-Write-Host "built: install.sh ($Version)" -ForegroundColor Green
+Write-Host "已构建： install.sh ($Version)" -ForegroundColor Green
 
 # ---- SHA256SUMS.txt：必须 LF（Linux 端 sha256sum -c / awk 才不会把 \r 当文件名）----
 $lines = Get-ChildItem $out -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | Sort-Object Name | ForEach-Object {
@@ -57,5 +57,5 @@ $sumsPath = Join-Path $out 'SHA256SUMS.txt'
 [IO.File]::WriteAllText($sumsPath, (($lines -join "`n") + "`n"), (New-Object Text.ASCIIEncoding))
 $bytes = [IO.File]::ReadAllBytes($sumsPath)
 if ($bytes -contains 13) { throw 'SHA256SUMS.txt 含 CR，必须是 LF' }
-Write-Host "SHA256SUMS.txt written ($($lines.Count) entries, LF)" -ForegroundColor Green
-Write-Host "提示：发布前核对 install.sh 的 sha256，并更新 CHANGELOG 与 Release 说明" -ForegroundColor Yellow
+Write-Host "已生成：SHA256SUMS.txt（$($lines.Count) 项，LF）" -ForegroundColor Green
+Write-Host "提示：发布前核对 install.sh 的 SHA256，并更新 CHANGELOG 与 Release 说明" -ForegroundColor Yellow

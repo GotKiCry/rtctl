@@ -21,7 +21,7 @@ func cmdFilePut(args []string) error {
 	sub.Parse(args)
 	rest := sub.Args()
 	if *token == "" || len(rest) != 2 {
-		fmt.Fprintln(os.Stderr, "用法: rtctl-client file-put -token <设备token> [-mode 0644] <本地文件> <远端路径>")
+		fmt.Fprintln(os.Stderr, "用法: rtctl file-put -token <token> [-mode 0644] <本地文件> <远端路径>")
 		os.Exit(2)
 	}
 	local, remote := rest[0], rest[1]
@@ -83,7 +83,7 @@ func cmdFileGet(args []string) error {
 	sub.Parse(args)
 	rest := sub.Args()
 	if *token == "" || len(rest) != 2 {
-		fmt.Fprintln(os.Stderr, "用法: rtctl-client file-get -token <设备token> <远端路径> <本地文件>")
+		fmt.Fprintln(os.Stderr, "用法: rtctl file-get -token <token> <远端路径> <本地文件>")
 		os.Exit(2)
 	}
 	remote, local := rest[0], rest[1]

@@ -25,7 +25,7 @@ for target in windows/amd64 linux/amd64 linux/arm64; do
   fi
   GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$LD" -o "bin/rtctl${suffix}${ext}" ./cmd/client
   GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$LD" -o "bin/rtctl-agent${suffix}${ext}" ./cmd/agent
-  printf 'built: rtctl%s%s / rtctl-agent%s%s (%s/%s)\n' "$suffix" "$ext" "$suffix" "$ext" "$os" "$arch"
+  printf '已构建： rtctl%s%s / rtctl-agent%s%s (%s/%s)\n' "$suffix" "$ext" "$suffix" "$ext" "$os" "$arch"
 done
 
 # install.sh：注入版本号、强制 LF（Release 资产之一，也是 README 一行自举的目标）
@@ -39,7 +39,7 @@ if grep -q '@@' bin/install.sh; then
   printf 'install.sh 仍有未替换的 @@ 占位符\n' >&2
   exit 1
 fi
-printf 'built: install.sh (%s)\n' "$VERSION"
+printf '已构建： install.sh (%s)\n' "$VERSION"
 
 # SHA256SUMS.txt：LF 行尾、纯文件名（兼容安装器的 awk 精确匹配）
 cd bin
@@ -58,5 +58,5 @@ if grep -q "$(printf '\r')" SHA256SUMS.txt; then
   printf 'SHA256SUMS.txt 含 CR，必须是 LF\n' >&2
   exit 1
 fi
-printf 'SHA256SUMS.txt written (%s entries, LF)\n' "$(wc -l < SHA256SUMS.txt | tr -d ' ')"
-printf '提示：发布前核对 install.sh 的 sha256，并更新 CHANGELOG 与 Release 说明\n'
+printf '已生成：SHA256SUMS.txt（%s 项，LF）\n' "$(wc -l < SHA256SUMS.txt | tr -d ' ')"
+printf '提示：发布前核对 install.sh 的 SHA256，并更新 CHANGELOG 与 Release 说明\n'

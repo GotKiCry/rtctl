@@ -143,3 +143,34 @@ func TestStatusListenAddr(t *testing.T) {
 		t.Fatalf("-listen 优先 = %q", got)
 	}
 }
+
+func TestStatusTokenPriority(t *testing.T) {
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "agent.conf")
+	if err := os.WriteFile(confPath, []byte("token = config-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RTCTL_TOKEN", "env-token")
+	if got := statusToken(runtimeOptions{configPath: confPath, token: "flag-token"}); got != "flag-token" {
+		t.Fatalf("命令行 token = %q", got)
+	}
+	if got := statusToken(runtimeOptions{configPath: confPath}); got != "config-token" {
+		t.Fatalf("配置文件 token = %q", got)
+	}
+	if got := statusToken(runtimeOptions{configPath: filepath.Join(dir, "missing.conf")}); got != "env-token" {
+		t.Fatalf("环境变量 token = %q", got)
+	}
+}
+
+func TestRunningStatusSummaryToken(t *testing.T) {
+	opts := runtimeOptions{token: "status-secret", printToken: true, logFile: "agent.log"}
+	got := runningStatusSummary(pidRecord{PID: 123}, opts)
+	if !strings.Contains(got, "设备 token: status-secret") {
+		t.Fatalf("-status 未打印 token：%q", got)
+	}
+	opts.printToken = false
+	got = runningStatusSummary(pidRecord{PID: 123}, opts)
+	if strings.Contains(got, "status-secret") || !strings.Contains(got, "设备 token: <已隐藏>") {
+		t.Fatalf("-print-token=false 未隐藏 token：%q", got)
+	}
+}
