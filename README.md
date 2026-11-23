@@ -150,16 +150,16 @@ sudo rt uninstall              # 默认保留配置和 token
 
 `--dev` 和 `--stable` 可为单次安装或升级指定渠道，`--release TAG` 可指定确切版本。尚未保存渠道时，`rt upgrade` 沿用已安装版本的渠道。
 
-固定的 dev 安装入口会下载并校验最新预发行版的管理脚本。已安装旧版的设备可用以下方式进入 dev 渠道：
+固定的安装入口提供 Release 和 Dev 两种选择，会下载并校验所选渠道的最新安装脚本。已安装旧版的设备可用以下方式检查并升级：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/install-dev.sh \
-  -o /tmp/rt-dev-install.sh
-sudo sh /tmp/rt-dev-install.sh upgrade --check
-sudo sh /tmp/rt-dev-install.sh upgrade
+curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
+  -o /tmp/rt-bootstrap.sh
+sudo sh /tmp/rt-bootstrap.sh upgrade --check
+sudo sh /tmp/rt-bootstrap.sh upgrade
 ```
 
-引导脚本会在当前终端等待升级结果。全新安装使用 `sudo sh /tmp/rt-dev-install.sh install`。用户级安装去掉 `sudo` 并加 `--scope user`。系统级安装完成后用 `sudo rt version --scope system` 确认版本。
+引导脚本会在当前终端等待升级结果。全新安装使用 `sudo sh /tmp/rt-bootstrap.sh install`。非交互场景在子命令前加 `--stable` 或 `--dev`。用户级安装去掉 `sudo` 并加 `--scope user`。系统级安装完成后用 `sudo rt version --scope system` 确认版本。
 
 使用 `v1.0.0` 及后续版本时：
 

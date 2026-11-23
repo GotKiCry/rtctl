@@ -6,7 +6,7 @@
 
 ### Added
 
-- `install-dev.sh` 提供固定的 dev 安装入口，自动下载并校验最新测试版的安装脚本。
+- `bootstrap.sh` 提供固定的安装入口，可选择 Release 或 Dev，并自动下载和校验所选渠道的最新脚本。
 - 终端中输入 `rt` 打开互动菜单，支持保存 stable/dev 渠道、检查更新、前台升级和确认卸载。
 - 安装和升级支持 `--dev` 选择 GitHub 预发行版，`--stable` 切回稳定渠道，`--release TAG` 可固定测试版本。
 
