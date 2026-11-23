@@ -1294,12 +1294,13 @@ render_openrc() {
     ok "已渲染 OpenRC 服务：/etc/init.d/rtctl-agent"
 }
 
-prepare_agent_log() {
+prepare_agent_dirs() {
     [ "$RT_SCOPE" = system ] || return 0
-    _rt_pal_dir=${RT_SYSTEM_AGENT_LOG%/*}
-    [ ! -L "$_rt_pal_dir" ] || return 1
-    priv install -d -m 0750 -o "$RT_RUN_USER" -g "$RT_RUN_GROUP" "$_rt_pal_dir" \
-        || return 1
+    priv install -d -m 0755 -o root -g root "$RT_STATE_DIR" || return 1
+    for _rt_pad_dir in "$RT_STATE_DIR/.rtctl" "${RT_SYSTEM_AGENT_LOG%/*}"; do
+        [ ! -L "$_rt_pad_dir" ] || return 1
+        priv install -d -m 0700 -o "$RT_RUN_USER" -g "$RT_RUN_GROUP" "$_rt_pad_dir" || return 1
+    done
     RT_SVC_LOG=$RT_SYSTEM_AGENT_LOG
 }
 
@@ -1915,11 +1916,10 @@ cmd_install() {
     # --- 步骤 7：运行用户、目录、配置、服务单元 ---
     detail "[6/8] 准备运行用户和配置"
     ensure_run_user
-    prepare_agent_log || die "$EX_FAIL" '无法准备 agent 日志目录'
+    prepare_agent_dirs || die "$EX_FAIL" '无法准备 agent 运行目录和日志目录'
     if [ "$RT_SCOPE" = system ]; then
         priv install -d -m 0750 -o root -g "$RT_RUN_GROUP" "$RT_CONF_DIR" \
             || die "$EX_FAIL" "创建配置目录失败：$RT_CONF_DIR"
-        priv install -d -m 0755 -o root -g root "$RT_STATE_DIR" 2>/dev/null || true
     else
         mkdir -p "$RT_CONF_DIR" 2>/dev/null || true
         chmod 0700 "$RT_CONF_DIR" 2>/dev/null || true
@@ -2252,7 +2252,7 @@ cmd_upgrade() {
     fetch_assets "$RT_TAG" "$RT_ARCH"
     _rt_u_newsha=$(sha256_of "$RT_DL_AGENT" || true)
     [ -n "$_rt_u_newsha" ] || die "$EX_CHECKSUM" '无法计算新 agent 的 SHA256，升级中止'
-    prepare_agent_log || die "$EX_FAIL" '无法准备 agent 日志目录，升级中止'
+    prepare_agent_dirs || die "$EX_FAIL" '无法准备 agent 运行目录和日志目录，升级中止'
     _rt_u_owner=''
     if [ "$RT_SCOPE" = system ]; then _rt_u_owner='root:root'; fi
     RT_PREV_BINARY=''
