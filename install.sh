@@ -38,6 +38,7 @@ RT_SCHEMA=1
 RT_NAME='rt'
 RT_AGENT_NAME='rtctl-agent'
 RT_SVC_NAME='rtctl-agent'
+RT_SYSTEM_AGENT_LOG='/var/log/rtctl-agent/agent.log'
 RT_RUN_USER='rtctl'
 RT_RUN_GROUP='rtctl'
 RT_BOOTSTRAP_URL='https://github.com/GotKiCry/rtctl/releases/latest/download/install.sh'
@@ -1293,6 +1294,15 @@ render_openrc() {
     ok "已渲染 OpenRC 服务：/etc/init.d/rtctl-agent"
 }
 
+prepare_agent_log() {
+    [ "$RT_SCOPE" = system ] || return 0
+    _rt_pal_dir=${RT_SYSTEM_AGENT_LOG%/*}
+    [ ! -L "$_rt_pal_dir" ] || return 1
+    priv install -d -m 0750 -o "$RT_RUN_USER" -g "$RT_RUN_GROUP" "$_rt_pal_dir" \
+        || return 1
+    RT_SVC_LOG=$RT_SYSTEM_AGENT_LOG
+}
+
 install_service_unit() {
     case "$RT_INIT" in
         systemd) render_unit "$RT_LISTEN_STATE" "$RT_WS_PATH_STATE" "$RT_ALLOW_SUDO_STATE" || return 1 ;;
@@ -1905,6 +1915,7 @@ cmd_install() {
     # --- 步骤 7：运行用户、目录、配置、服务单元 ---
     detail "[6/8] 准备运行用户和配置"
     ensure_run_user
+    prepare_agent_log || die "$EX_FAIL" '无法准备 agent 日志目录'
     if [ "$RT_SCOPE" = system ]; then
         priv install -d -m 0750 -o root -g "$RT_RUN_GROUP" "$RT_CONF_DIR" \
             || die "$EX_FAIL" "创建配置目录失败：$RT_CONF_DIR"
@@ -2241,6 +2252,7 @@ cmd_upgrade() {
     fetch_assets "$RT_TAG" "$RT_ARCH"
     _rt_u_newsha=$(sha256_of "$RT_DL_AGENT" || true)
     [ -n "$_rt_u_newsha" ] || die "$EX_CHECKSUM" '无法计算新 agent 的 SHA256，升级中止'
+    prepare_agent_log || die "$EX_FAIL" '无法准备 agent 日志目录，升级中止'
     _rt_u_owner=''
     if [ "$RT_SCOPE" = system ]; then _rt_u_owner='root:root'; fi
     RT_PREV_BINARY=''
@@ -2363,6 +2375,7 @@ cmd_uninstall() {
         hint "旧版安装记录了 ${RT_FW_BACKEND:-系统防火墙} 的 TCP $RT_PORT_STATE 放行规则，卸载后请在现有防火墙中检查并按需移除"
     fi
     say '[6/6] 处理配置与状态'
+    priv rm -f "$RT_STATE_FILE" || die "$EX_FAIL" "无法移除安装状态文件：$RT_STATE_FILE"
     if [ "$RT_PURGE" = 1 ]; then
         if [ -f "$RT_CONF" ]; then
             if have shred; then priv shred -u "$RT_CONF" 2>/dev/null || priv rm -f "$RT_CONF"; else priv rm -f "$RT_CONF"; fi
@@ -2381,6 +2394,7 @@ cmd_uninstall() {
         priv rm -rf "$RT_LOG_DIR" 2>/dev/null || true
         priv rmdir "$RT_CONF_DIR" 2>/dev/null || true
         if [ "$RT_SCOPE" = system ]; then
+            priv rmdir "${RT_SYSTEM_AGENT_LOG%/*}" 2>/dev/null || true
             priv rm -rf "$RT_STATE_DIR" 2>/dev/null || true
             if run_user_exists && have userdel; then
                 priv userdel "$RT_RUN_USER" >/dev/null 2>&1 || warn "userdel $RT_RUN_USER 失败（不影响卸载）"
@@ -3301,7 +3315,7 @@ scope_paths() {
         RT_STATE_FILE='/etc/rtctl/install.env'
         RT_LOG_DIR='/var/log/rtctl'
         RT_LOG_FILE='/var/log/rtctl/install.log'
-        RT_SVC_LOG='/var/log/rtctl-agent.log'
+        RT_SVC_LOG=$RT_SYSTEM_AGENT_LOG
         RT_PID_FILE='/run/rtctl-agent.pid'
         RT_UNIT='/etc/systemd/system/rtctl-agent.service'
         RT_RUN_USER='rtctl'
