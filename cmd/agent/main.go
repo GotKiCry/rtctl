@@ -43,13 +43,6 @@ type cfg struct {
 	wsPath    string
 }
 
-// firewallResult 各平台 firewall_*.go 的 openFirewallPort 返回值：
-// summary 为单行摘要（进启动块），detail 为附加提示（可为空）。
-type firewallResult struct {
-	summary string
-	detail  string
-}
-
 // loadConfig 解析 agent.conf（key = value，# 或 ; 注释，空行忽略）。
 func loadConfig(path string) (cfg, error) {
 	var c cfg
@@ -187,9 +180,9 @@ func localIPv4s() []string {
 	return append(out, "127.0.0.1")
 }
 
-// printStartup 格式化打印启动信息：监听地址、本机可用地址、防火墙状态、连接示例。
+// printStartup 打印监听地址、防火墙提示和连接示例。
 // showToken=false 时不打印 token（避免 token 进入日志采集，如 journald）。
-func printStartup(c cfg, configPath, fwSummary string, showToken bool) {
+func printStartup(c cfg, configPath string, showToken, showFirewallHint bool) {
 	schema := "ws"
 	if c.tlsCert != "" {
 		schema = "wss"
@@ -219,8 +212,13 @@ func printStartup(c cfg, configPath, fwSummary string, showToken bool) {
 	fmt.Printf("✔ rtctl-agent 启动（设备：%s）\n", c.id)
 	fmt.Printf("  监听 : %s（%s，路径 %s）\n", c.listen, schema, wsPath)
 	fmt.Printf("  地址 : %s\n", strings.Join(hostPorts, " / "))
-	if fwSummary != "" {
-		fmt.Printf("  防火墙 : %s\n", fwSummary)
+	loopback := host == "localhost" || net.ParseIP(host).IsLoopback()
+	if showFirewallHint && port != "" && port != "0" {
+		if loopback {
+			fmt.Println("  防火墙 : 仅监听回环地址，适用于本机访问或反向代理")
+		} else {
+			fmt.Printf("  防火墙 : 请从控制机验证 TCP %s 可达，必要时在现有防火墙或安全组中放行\n", port)
+		}
 	}
 	if showToken {
 		fmt.Printf("  token : %s\n", c.token)
@@ -234,7 +232,11 @@ func printStartup(c cfg, configPath, fwSummary string, showToken bool) {
 	fmt.Printf("  远程 sudo : %s\n", sudoStatus)
 	fmt.Printf("  配置 : %s\n", configPath)
 	if len(hostPorts) > 0 {
-		fmt.Printf("  控制机执行 :\n")
+		if loopback {
+			fmt.Println("  本机验证 :")
+		} else {
+			fmt.Println("  控制机执行 :")
+		}
 		if wsPath == "/ws" && schema == "ws" {
 			fmt.Printf("    rtctl %s <token> 'uptime'\n", hostPorts[0])
 		} else {
@@ -253,7 +255,7 @@ type runtimeOptions struct {
 	tlsKey       string
 	wsPath       string
 	allowSudo    bool
-	openFirewall bool
+	firewallHint bool
 	printToken   bool
 	foreground   bool
 	logFile      string
@@ -291,7 +293,7 @@ func runMain() int {
 	tlsCert := flag.String("tls-cert", "", "TLS 证书路径（与 -tls-key 同时提供则启用 WSS）")
 	tlsKey := flag.String("tls-key", "", "TLS 私钥路径")
 	allowSudo := flag.Bool("allow-sudo", false, "允许远程 sudo（永久授权需 sudoers，临时授权需 root 密码；默认关闭）")
-	openFirewall := flag.Bool("open-firewall", true, "启动时自动放行监听端口（Linux: ufw/firewalld/iptables；Windows: netsh；需 root/管理员或免密 sudo；关闭用 -open-firewall=false）")
+	firewallHint := flag.Bool("open-firewall", true, "显示防火墙提示（兼容旧参数名，仅提示）")
 	wsPath := flag.String("ws-path", "", "WebSocket 路径（默认 /ws；反向代理/路径前缀场景可改，如 /rt/ws）")
 	printToken := flag.Bool("print-token", true, "启动和 -status 输出完整 token；设为 false 可避免写入终端或日志")
 	showVersion := flag.Bool("version", false, "打印版本后退出")
@@ -378,7 +380,7 @@ func runMain() int {
 	opts := runtimeOptions{
 		configPath: *configPath, listen: *listen, id: *id, token: *token,
 		tlsCert: *tlsCert, tlsKey: *tlsKey, wsPath: *wsPath,
-		allowSudo: *allowSudo, openFirewall: *openFirewall, printToken: *printToken,
+		allowSudo: *allowSudo, firewallHint: *firewallHint, printToken: *printToken,
 		foreground: *foreground, logFile: *logFile, pidFile: *pidFile, daemonReady: *daemonReady,
 	}
 	if *statusMode && *stopMode {
@@ -449,16 +451,8 @@ func runMain() int {
 		ignoreTerminalHangup()
 	}
 
-	fwSum, fwDetail := "", ""
-	if opts.daemonReady == "" && opts.openFirewall {
-		fr, _ := openFirewallPort(c.listen)
-		fwSum, fwDetail = fr.summary, fr.detail
-	}
-	if fwDetail != "" {
-		fmt.Println(fwDetail)
-	}
 	if opts.daemonReady == "" && opts.foreground {
-		printStartup(c, opts.configPath, fwSum, opts.printToken)
+		printStartup(c, opts.configPath, opts.printToken, opts.firewallHint)
 		fmt.Printf("  日志文件 : %s\n", opts.logFile)
 		fmt.Printf("  查看日志 : %s -logs -follow -log-file %s\n", strconv.Quote(os.Args[0]), strconv.Quote(opts.logFile))
 	}
@@ -468,7 +462,16 @@ func runMain() int {
 			fmt.Fprintf(os.Stderr, "rtctl-agent: %v\n", err)
 			return 1
 		}
-		printStartup(c, opts.configPath, fwSum, opts.printToken)
+		if result.Addr != "" {
+			host, configuredPort, _ := net.SplitHostPort(c.listen)
+			if configuredPort == "0" {
+				_, port, addrErr := net.SplitHostPort(result.Addr)
+				if addrErr == nil {
+					c.listen = net.JoinHostPort(host, port)
+				}
+			}
+		}
+		printStartup(c, opts.configPath, opts.printToken, opts.firewallHint)
 		fmt.Printf("  后台 PID  : %d\n", result.PID)
 		if result.Addr != "" {
 			fmt.Printf("  实际监听 : %s\n", result.Addr)

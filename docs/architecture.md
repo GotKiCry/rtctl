@@ -176,7 +176,7 @@ rtctl 由两个二进制组成：
 | agent | `-ws-path` | `/ws` | WebSocket 路径，健康检查同步注册在对应前缀下 |
 | agent | `-allow-sudo` | false | 允许 root 特权命令 |
 | agent | `-print-token` | true | 启动及 `-status` 输出是否打印完整 token；服务安装时默认关闭 |
-| agent | `-open-firewall` | true | 启动时自动放行监听端口（best-effort：root/管理员直接执行，否则尝试免密 sudo；失败只提示不阻塞） |
+| agent | `-open-firewall` | true | 兼容旧参数名，控制启动时是否显示防火墙提示 |
 | agent | `-foreground` | false | 前台运行；默认直接启动会后台化，服务管理器托管时必须传此参数 |
 | agent | `-status` / `-stop` | — | 查询（默认显示 token）/停止 PID 文件对应的本机实例 |
 | agent | `-logs` | — | 查看运行日志后退出（自带脱敏与终端着色；只读日志，不启动服务） |

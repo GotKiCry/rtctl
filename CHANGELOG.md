@@ -4,15 +4,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- 安装和升级支持 `--dev` 选择 GitHub 预发行版，`--stable` 切回稳定渠道，`--release TAG` 可固定测试版本。
+
 ### Fixed
+
+- 覆盖安装和升级在下载、校验通过后才停止旧服务。升级在备份旧版 agent 后执行，恢复二进制、重启和健康检查都成功才记为已回滚。
 
 - 修复健康检查未绕过 `http_proxy`/`HTTP_PROXY`：带代理的机器上 curl/wget 会把 `127.0.0.1` 的探活请求发给代理，造成 agent 正常却安装失败（exit 9）；curl 加 `--noproxy '*'`，wget 加 `no_proxy`。
 - 修复 `rt_open_tty` 在严格 POSIX sh（dash、`bash --posix`）且无控制终端（`curl | sh`、ssh 未加 `-t`、cron、CI）时，`exec 3</dev/tty` 重定向错误直接杀死非交互 shell，脚本零输出退出；改用非特殊内建先探测再持有。
 - 修复 `rt enable` 在 systemd/openrc 下成功后仍误报"无法设置开机自启"：`svc_enable` 成功后未更新 `RT_AUTOSTART`，状态文件记录与实际不符。
 - 修复 `rt doctor` 权限检查不区分安装范围：用户级安装的 `600 <用户>:<组>` 被按系统级 `600 rtctl:rtctl` 误报；期望值现按 scope 生成。
-- 修复保留旧配置的升级安装不再收紧用户级配置目录权限（停留在 775 等 umask 默认值，token 文件名对同机其他用户可见）；`rt install` 现在无条件 `chmod 700`。
 
 ### Changed
+
+- 安装、连接引导和自检提供只读防火墙检查与手工配置提示。安装器、agent 和卸载器均不修改系统的防火墙规则。
 
 - `rtctl-agent -status` 默认显示当前设备 token，可通过 `-print-token=false` 隐藏，手工部署无需再直接读取配置文件。
 - 精简 Linux 安装、管理命令及客户端/agent 输出，实现细节移至 `--verbose`，帮助页按使用场景组织。

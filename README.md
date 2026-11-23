@@ -43,7 +43,7 @@ sh /tmp/rt-install.sh install --scope user
 
 默认只显示安装结果、连接信息和安全提示；添加 `--verbose` 可查看下载地址、哈希和服务单元等技术细节。
 
-防火墙仅在 root 或免密 `sudo` 可用时自动配置；其他环境不会修改防火墙。安装器仍会执行本机健康检查，控制机无法连接时需手动放行端口。
+防火墙检查为只读。安装完成、`rt connect` 和 `rt doctor` 会提示如何从控制机验证连接，并根据目标机的防火墙给出手工检查或放行指引。已有规则由系统防火墙管理器维护。`--no-firewall` 可跳过检查和提示，`--allow-from CIDR` 可在手工指引中指定来源网段。
 
 ### 2. 获取连接信息
 
@@ -119,7 +119,7 @@ sudo rt logs -f                # 实时日志
 sudo rt restart                # 重启并检查健康状态
 sudo rt doctor                 # 安装与安全自检
 sudo rt config edit            # 编辑配置（之后执行 rt restart）
-sudo rt upgrade                # 升级，失败自动回滚
+sudo rt upgrade                # 升级，失败时尝试恢复并检查旧版本
 sudo rt uninstall              # 默认保留配置和 token
 ```
 
@@ -140,6 +140,23 @@ sudo rt uninstall              # 默认保留配置和 token
 服务管理器托管时必须使用 `-foreground`。默认日志为 `~/.rtctl/agent.log`，每个约 10MB，保留 3 个轮转备份；`-logs` 查看时会脱敏，管道或重定向输出自动禁用颜色。
 
 ## 升级与旧版本覆盖
+
+覆盖安装和升级会在下载、校验通过后停止旧服务。升级失败后，只有恢复旧版 agent、重启并通过本机健康检查才会报告回滚成功。
+
+### 测试 dev 版本
+
+`--dev` 选择 GitHub 上版本号最高的 `vX.Y.Z-dev.N` 预发行版。已有 dev 版本运行 `rt upgrade` 时会继续检查 dev 渠道，`--stable` 可切回稳定版，`--release TAG` 可指定确切的版本。
+
+已安装 v1.0.1 等旧版的设备，可通过测试版的管理脚本进入 dev 渠道：
+
+```bash
+curl -fsSL https://github.com/GotKiCry/rtctl/releases/download/v1.0.2-dev.1/install.sh \
+  -o /tmp/rt-dev-install.sh
+sudo sh /tmp/rt-dev-install.sh upgrade --dev --check
+sudo sh /tmp/rt-dev-install.sh upgrade --dev
+```
+
+全新安装使用 `sudo sh /tmp/rt-dev-install.sh install --dev`。用户级安装去掉 `sudo` 并加 `--scope user`。升级后可用 `rt version` 查看已安装版本。
 
 使用 `v1.0.0` 及后续版本时：
 

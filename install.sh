@@ -433,8 +433,6 @@ state_write() {
         printf 'LOG_FILE=%s\n' "${RT_SVC_LOG:-}"
         printf 'PID_FILE=%s\n' "${RT_PID_FILE:-}"
         printf 'FW_BACKEND=%s\n' "${RT_FW_BACKEND:-}"
-        printf 'FW_RULE=%s\n' "${RT_FW_RULE:-}"
-        printf 'FW_UNDO=%s\n' "${RT_FW_UNDO:-}"
         printf 'FW_APPLIED=%s\n' "${RT_FW_APPLIED:-false}"
         printf 'AUTOSTART=%s\n' "${RT_AUTOSTART:-none}"
         printf 'AGENT_VERSION=%s\n' "${RT_AGENT_VERSION:-unknown}"
@@ -493,8 +491,6 @@ load_state() {
     RT_SVC_LOG=$(state_get LOG_FILE)
     RT_PID_FILE=$(state_get PID_FILE)
     RT_FW_BACKEND=$(state_get FW_BACKEND)
-    RT_FW_RULE=$(state_get FW_RULE)
-    RT_FW_UNDO=$(state_get FW_UNDO)
     RT_FW_APPLIED=$(state_get FW_APPLIED)
     RT_AUTOSTART=$(state_get AUTOSTART)
     RT_AGENT_VERSION=$(state_get AGENT_VERSION)
@@ -928,17 +924,47 @@ agent_init_config() {
 }
 
 # ---------------------------------------------------------------------------
-# 版本解析与下载（不调 GitHub API，避免 60 次/小时限流）
+# 版本解析与下载（只有 dev 查询使用 GitHub Releases API）
 # ---------------------------------------------------------------------------
+is_dev_release() {
+    printf '%s\n' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$'
+}
+
+resolve_dev_release() {
+    rt_tmpfile
+    _rt_rd_file=$RT_TMPFILE
+    if ! dl_url "https://api.github.com/repos/$RT_REPO/releases?per_page=100" "$_rt_rd_file"; then
+        rm -f "$_rt_rd_file"
+        die "$EX_DOWNLOAD" '无法查询 GitHub 测试版，请用 --release 指定已知的 dev 版本'
+    fi
+    # 只取 API 的 tag_name 字段。按版本号排序，避免重发旧版本时将其选为最新。
+    RT_TAG_OUT=$(awk -F '"' '
+        $2 == "tag_name" && $4 ~ /^v[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$/ {
+            split(substr($4, 2), version, /[.-]/)
+            print version[1], version[2], version[3], version[5], $4
+        }
+    ' "$_rt_rd_file" | LC_ALL=C sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | awk 'NR == 1 { print $5 }')
+    rm -f "$_rt_rd_file"
+    [ -n "$RT_TAG_OUT" ] || die "$EX_DOWNLOAD" '未找到已发布的 dev 测试版（标签格式 vX.Y.Z-dev.N）'
+}
+
 # resolve_release_tag —— 结果放 RT_TAG_OUT（必须在当前 shell 调用）
 resolve_release_tag() {
     RT_TAG_OUT=''
     if [ -n "$RT_RELEASE" ]; then
         case "$RT_RELEASE" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) die "$EX_USAGE" "--release 必须是 vX.Y.Z 形式：$RT_RELEASE" ;;
+            *[!A-Za-z0-9.-]*) die "$EX_USAGE" '--release 格式为 vX.Y.Z 或 vX.Y.Z-dev.N' ;;
         esac
+        if ! printf '%s\n' "$RT_RELEASE" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([.-][A-Za-z0-9]+)*)?$'; then
+            die "$EX_USAGE" '--release 格式为 vX.Y.Z 或 vX.Y.Z-dev.N'
+        fi
         RT_TAG_OUT=$RT_RELEASE
+        return 0
+    fi
+    if [ "$RT_RELEASE_CHANNEL" = dev ] || {
+        [ -z "$RT_RELEASE_CHANNEL" ] && [ "$RT_CMD" = upgrade ] && is_dev_release "$RT_AGENT_VERSION"
+    }; then
+        resolve_dev_release
         return 0
     fi
     _rt_rrt_loc=''
@@ -986,7 +1012,7 @@ dl_url() {
     fi
     if have wget; then
         if [ -n "$RT_PROXY" ]; then
-            HTTPS_PROXY="$RT_PROXY" HTTP_PROXY="$RT_PROXY" wget -q -T 30 -O "$_rt_du_dst" "$_rt_du_url"
+            https_proxy="$RT_PROXY" http_proxy="$RT_PROXY" wget -q -T 30 -O "$_rt_du_dst" "$_rt_du_url"
         else
             wget -q -T 30 -O "$_rt_du_dst" "$_rt_du_url"
         fi
@@ -1162,8 +1188,7 @@ render_unit() {
     fi
     _rt_ru_nnp='yes'
     if [ "$_rt_ru_allow_sudo" = 1 ]; then _rt_ru_nnp='no'; fi
-    rt_tmpfile
-    _rt_ru_tmp=$RT_TMPFILE
+    _rt_ru_tmp=$(rt_tmpfile && printf '%s' "$RT_TMPFILE") || return 1
     {
         printf '# 由 %s %s 生成并托管；手工修改会在下次 install/upgrade 时被重写\n' "$RT_NAME" "$RT_VERSION"
         printf '[Unit]\n'
@@ -1211,9 +1236,9 @@ render_unit() {
         fi
     } >"$_rt_ru_tmp"
     if [ "$RT_SCOPE" = system ]; then
-        atomic_put "$_rt_ru_tmp" "$RT_UNIT" 0644 root:root || { rm -f "$_rt_ru_tmp"; die "$EX_FAIL" "写入 unit 失败：$RT_UNIT"; }
+        atomic_put "$_rt_ru_tmp" "$RT_UNIT" 0644 root:root || { rm -f "$_rt_ru_tmp"; err "写入服务单元失败：$RT_UNIT"; return 1; }
     else
-        atomic_put "$_rt_ru_tmp" "$RT_UNIT" 0644 || { rm -f "$_rt_ru_tmp"; die "$EX_FAIL" "写入 unit 失败：$RT_UNIT"; }
+        atomic_put "$_rt_ru_tmp" "$RT_UNIT" 0644 || { rm -f "$_rt_ru_tmp"; err "写入服务单元失败：$RT_UNIT"; return 1; }
     fi
     rm -f "$_rt_ru_tmp" 2>/dev/null || true
     detail "服务单元：$RT_UNIT（NoNewPrivileges=$_rt_ru_nnp${_rt_ru_extra}）"
@@ -1229,8 +1254,7 @@ render_unit() {
 }
 
 render_openrc() {
-    rt_tmpfile
-    _rt_ro_tmp=$RT_TMPFILE
+    _rt_ro_tmp=$(rt_tmpfile && printf '%s' "$RT_TMPFILE") || return 1
     _rt_ro_extra=''
     if [ "$RT_CAP_PRINT_TOKEN" = true ]; then _rt_ro_extra="$_rt_ro_extra -print-token=false"; fi
     if [ "$RT_CAP_OPEN_FIREWALL" = true ]; then _rt_ro_extra="$_rt_ro_extra -open-firewall=false"; fi
@@ -1261,17 +1285,17 @@ render_openrc() {
         printf '}\n'
     } >"$_rt_ro_tmp"
     atomic_put "$_rt_ro_tmp" "/etc/init.d/rtctl-agent" 0755 root:root \
-        || { rm -f "$_rt_ro_tmp"; die "$EX_FAIL" "写入 OpenRC 脚本失败：/etc/init.d/rtctl-agent"; }
+        || { rm -f "$_rt_ro_tmp"; err '写入 OpenRC 服务脚本失败：/etc/init.d/rtctl-agent'; return 1; }
     rm -f "$_rt_ro_tmp" 2>/dev/null || true
     ok "已渲染 OpenRC 服务：/etc/init.d/rtctl-agent"
 }
 
 install_service_unit() {
     case "$RT_INIT" in
-        systemd) render_unit "$RT_LISTEN_STATE" "$RT_WS_PATH_STATE" "$RT_ALLOW_SUDO_STATE" ;;
-        openrc) render_openrc ;;
+        systemd) render_unit "$RT_LISTEN_STATE" "$RT_WS_PATH_STATE" "$RT_ALLOW_SUDO_STATE" || return 1 ;;
+        openrc) render_openrc || return 1 ;;
         nohup) info "无 init 系统：使用 nohup+pidfile 托管（容器/WSL）" ;;
-        *) die "$EX_FAIL" "未知服务后端：$RT_INIT" ;;
+        *) err "未知服务后端：$RT_INIT"; return 1 ;;
     esac
     RT_LOG_SOURCE='journald'
     if [ "$RT_INIT" = openrc ]; then RT_LOG_SOURCE=$RT_SVC_LOG; fi
@@ -1281,7 +1305,7 @@ install_service_unit() {
 
 svc_daemon_reload() {
     case "$RT_INIT" in
-        systemd) systemctl_do daemon-reload >/dev/null 2>&1 || true ;;
+        systemd) systemctl_do daemon-reload >/dev/null 2>&1 ;;
         *) : ;;
     esac
 }
@@ -1527,153 +1551,72 @@ svc_logs() {
 }
 
 # ---------------------------------------------------------------------------
-# 防火墙（唯一归属 install：放行一次并记录，便于卸载回滚）
+# 防火墙（仅读取状态并提供手工配置提示）
 # ---------------------------------------------------------------------------
-fw_detect() {
-    if have ufw && ufw status 2>/dev/null | grep -q '^Status:[[:space:]]*active'; then
-        printf 'ufw'
-        return 0
-    fi
-    if have firewall-cmd && firewall-cmd --state 2>/dev/null | grep -q 'running'; then
-        printf 'firewalld'
-        return 0
-    fi
-    if have iptables; then
-        printf 'iptables'
-        return 0
-    fi
-    printf 'none'
-}
-
-fw_can_modify() {
-    if [ "$RT_EUID" = 0 ]; then
-        return 0
-    fi
-    if ! have sudo || ! sudo -n true >/dev/null 2>&1; then
+fw_read() {
+    if LC_ALL=C "$@" 2>/dev/null; then return 0; fi
+    if [ "$RT_EUID" != 0 ] && have sudo; then
+        LC_ALL=C sudo -n -- "$@" 2>/dev/null
+    else
         return 1
     fi
-    return 0
 }
 
-# 防火墙只使用 root 或免密 sudo，避免远程执行时在继承的 /dev/tty 上隐藏等待密码。
-fw_priv() {
-    if [ "$RT_EUID" = 0 ]; then
-        "$@"
-        return $?
-    fi
-    if ! fw_can_modify; then
-        return 126
-    fi
-    sudo -n -- "$@"
+listen_is_loopback() {
+    case "$1" in
+        127.*:*|\[::1\]:*|localhost:*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
-fw_apply() {
-    _rt_fa_port=$1
-    RT_FW_APPLIED=false
-    RT_FW_RULE=''
-    RT_FW_UNDO=''
-    if ! fw_can_modify; then
-        RT_FW_BACKEND='none'
-        warn "未修改防火墙（需要 root 或免密 sudo）；若控制机无法连接，请放行 $_rt_fa_port/tcp"
+fw_check() {
+    [ "$RT_NO_FIREWALL" = 0 ] && [ "$RT_QUIET" = 0 ] || return 0
+    _rt_fw_port=$1
+    case "$_rt_fw_port" in ''|*[!0-9]*) return 0 ;; esac
+    if listen_is_loopback "$RT_LISTEN_STATE"; then
+        info '防火墙：agent 仅监听本机，控制机应通过反向代理或隧道连接'
         return 0
     fi
-    _rt_fa_backend=$(fw_detect)
-    RT_FW_BACKEND=$_rt_fa_backend
-    case "$_rt_fa_backend" in
-        ufw)
-            if fw_priv ufw allow "$_rt_fa_port/tcp" comment 'rtctl' >/dev/null 2>&1 \
-                || fw_priv ufw allow "$_rt_fa_port/tcp" >/dev/null 2>&1; then
-                RT_FW_APPLIED=true
-                RT_FW_RULE="allow $_rt_fa_port/tcp"
-                RT_FW_UNDO="ufw delete allow $_rt_fa_port/tcp"
-                ok "防火墙已放行 $_rt_fa_port/tcp（ufw）"
-            else
-                warn "ufw 放行失败（需要 root；非交互安装仅尝试免密 sudo），请手工执行：sudo ufw allow $_rt_fa_port/tcp"
-            fi
-            ;;
-        firewalld)
-            if fw_priv firewall-cmd --permanent --add-port="$_rt_fa_port/tcp" >/dev/null 2>&1 \
-                && fw_priv firewall-cmd --reload >/dev/null 2>&1; then
-                RT_FW_APPLIED=true
-                RT_FW_RULE="port=$_rt_fa_port/tcp"
-                RT_FW_UNDO="firewall-cmd --permanent --remove-port=$_rt_fa_port/tcp && firewall-cmd --reload"
-                ok "防火墙已放行 $_rt_fa_port/tcp（firewalld）"
-            else
-                warn "firewalld 放行失败（需要 root；非交互安装仅尝试免密 sudo），请手工执行：sudo firewall-cmd --permanent --add-port=$_rt_fa_port/tcp && sudo firewall-cmd --reload"
-            fi
-            ;;
-        iptables)
-            _rt_fa_ok=0
-            if fw_priv iptables -I INPUT -p tcp --dport "$_rt_fa_port" -m comment --comment rtctl -j ACCEPT >/dev/null 2>&1; then
-                _rt_fa_ok=1
-            fi
-            if have ip6tables; then
-                fw_priv ip6tables -I INPUT -p tcp --dport "$_rt_fa_port" -m comment --comment rtctl -j ACCEPT >/dev/null 2>&1 || true
-            fi
-            if [ "$_rt_fa_ok" = 1 ]; then
-                RT_FW_APPLIED=true
-                RT_FW_RULE="INPUT -p tcp --dport $_rt_fa_port -m comment --comment rtctl -j ACCEPT"
-                RT_FW_UNDO="iptables -D INPUT -p tcp --dport $_rt_fa_port -m comment --comment rtctl -j ACCEPT"
-                ok "防火墙已放行 $_rt_fa_port/tcp（iptables）"
-                warn "iptables 规则重启后不保留：请执行 netfilter-persistent save 或改用 ufw/firewalld"
-            else
-                warn "iptables 放行失败（需要 root；非交互安装仅尝试免密 sudo），请手工执行：sudo iptables -I INPUT -p tcp --dport $_rt_fa_port -j ACCEPT"
-            fi
-            ;;
-        *)
-            warn "未检测到 ufw/firewalld/iptables，跳过放行；若在外网请自行放行 $_rt_fa_port/tcp"
-            ;;
-    esac
+
+    info "防火墙：从控制机验证 TCP $_rt_fw_port 是否可达"
+    if have ufw && _rt_fw_status=$(fw_read ufw status) \
+        && printf '%s\n' "$_rt_fw_status" | grep -q '^Status:[[:space:]]*active$'; then
+        if printf '%s\n' "$_rt_fw_status" | awk -v port="$_rt_fw_port/tcp" '$1 == port && $2 == "ALLOW" { found=1 } END { exit !found }'; then
+            hint "UFW 中存在 TCP $_rt_fw_port 的 ALLOW 条目，请检查来源范围"
+        fi
+        hint '查看 UFW 规则：sudo ufw status verbose'
+        if [ -n "$RT_ALLOW_FROM" ]; then
+            case "$RT_ALLOW_FROM" in
+                *[!0-9a-fA-F:./]*) hint '请在 UFW 中使用有效的来源 IP 或 CIDR' ;;
+                *) hint "按需放行：sudo ufw allow proto tcp from $RT_ALLOW_FROM to any port $_rt_fw_port" ;;
+            esac
+        else
+            hint "按需放行（将 控制机IP 替换为实际 IP 或网段）：sudo ufw allow proto tcp from 控制机IP to any port $_rt_fw_port"
+        fi
+    elif have firewall-cmd && fw_read firewall-cmd --state | grep -qx running; then
+        hint '查看 firewalld 区域：sudo firewall-cmd --get-active-zones'
+        hint "查默认区域端口规则：sudo firewall-cmd --query-port=$_rt_fw_port/tcp"
+        if fw_read firewall-cmd "--query-port=$_rt_fw_port/tcp" | grep -qx yes; then
+            hint "firewalld 默认区域已配置 TCP $_rt_fw_port"
+        fi
+        if [ -z "$RT_ALLOW_FROM" ]; then
+            hint "如使用默认区域：sudo firewall-cmd --permanent --add-port=$_rt_fw_port/tcp && sudo firewall-cmd --reload"
+        fi
+    elif have iptables; then
+        hint '查看主机入站规则：sudo iptables -S INPUT'
+        if fw_read iptables -C INPUT -p tcp --dport "$_rt_fw_port" -m comment --comment rtctl -j ACCEPT; then
+            hint "发现旧版 rtctl 添加的 IPv4 放行规则：TCP $_rt_fw_port"
+        fi
+        if have ip6tables; then hint '查看 IPv6 入站规则：sudo ip6tables -S INPUT'; fi
+        hint "需要放行时，请通过系统现有的防火墙配置管理 $_rt_fw_port/tcp 的持久规则"
+    elif have nft; then
+        hint '查看 nftables 规则：sudo nft list ruleset'
+    else
+        hint "请检查目标机防火墙和上游安全组是否允许 TCP $_rt_fw_port"
+    fi
     if [ -n "$RT_ALLOW_FROM" ]; then
-        hint "限源提示（--allow-from $RT_ALLOW_FROM）：请用防火墙/安全组把 $_rt_fa_port/tcp 限制到该网段"
+        hint "按来源放行，仅允许 $RT_ALLOW_FROM 访问 TCP $_rt_fw_port"
     fi
-    return 0
-}
-
-fw_revoke() {
-    _rt_fr_backend=${RT_FW_BACKEND:-$(state_get FW_BACKEND)}
-    _rt_fr_applied=${RT_FW_APPLIED:-$(state_get FW_APPLIED)}
-    _rt_fr_port=${RT_PORT_STATE:-$(state_get PORT)}
-    [ -n "$_rt_fr_port" ] || return 0
-    if [ "$_rt_fr_applied" != true ]; then
-        hint "安装时未成功放行防火墙规则，跳过撤销"
-        return 0
-    fi
-    case "$_rt_fr_backend" in
-        ufw)
-            if fw_priv ufw --force delete allow "$_rt_fr_port/tcp" >/dev/null 2>&1; then
-                ok "已撤销 ufw 规则：allow $_rt_fr_port/tcp"
-            else
-                warn "ufw 规则撤销失败，请手工执行：sudo ufw delete allow $_rt_fr_port/tcp"
-            fi
-            ;;
-        firewalld)
-            if fw_priv firewall-cmd --permanent --remove-port="$_rt_fr_port/tcp" >/dev/null 2>&1 \
-                && fw_priv firewall-cmd --reload >/dev/null 2>&1; then
-                ok "已撤销 firewalld 端口：$_rt_fr_port/tcp"
-            else
-                warn "firewalld 撤销失败，请手工执行：sudo firewall-cmd --permanent --remove-port=$_rt_fr_port/tcp && sudo firewall-cmd --reload"
-            fi
-            ;;
-        iptables)
-            _rt_fr_i=0
-            while [ "$_rt_fr_i" -lt 5 ]; do
-                if fw_priv iptables -D INPUT -p tcp --dport "$_rt_fr_port" -m comment --comment rtctl -j ACCEPT >/dev/null 2>&1; then
-                    _rt_fr_i=$((_rt_fr_i + 1))
-                else
-                    break
-                fi
-            done
-            if have ip6tables; then
-                fw_priv ip6tables -D INPUT -p tcp --dport "$_rt_fr_port" -m comment --comment rtctl -j ACCEPT >/dev/null 2>&1 || true
-            fi
-            ok "已撤销 iptables 规则（带 comment rtctl 的才删）"
-            ;;
-        *)
-            hint "无防火墙后端记录，跳过撤销"
-            ;;
-    esac
-    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1763,9 +1706,21 @@ print_guidance() {
         hint "查看 token：$_rt_pg_rt token show --reveal（需交互终端）"
     fi
     say ''
-    say '在 Linux 控制机下载客户端并执行：'
-    hint "curl -fsSL $RT_RELEASES/latest/download/rtctl-linux-amd64 -o rtctl && chmod +x rtctl"
-    _rt_pg_ip=$(local_ips | head -n1 || printf '127.0.0.1')
+    if listen_is_loopback "$_rt_pg_listen"; then
+        say '在目标机本地验证连接：'
+    else
+        say '在 Linux 控制机下载客户端并验证连接：'
+    fi
+    _rt_pg_download="$RT_RELEASES/latest/download"
+    if is_dev_release "$RT_AGENT_VERSION"; then
+        _rt_pg_download="$RT_RELEASES/download/$RT_AGENT_VERSION"
+    fi
+    hint "curl -fsSL $_rt_pg_download/rtctl-linux-amd64 -o rtctl && chmod +x rtctl"
+    case "$_rt_pg_listen" in
+        :*|0.0.0.0:*|\[::\]:*) _rt_pg_ip=$(local_ips | head -n1) ;;
+        *) _rt_pg_ip=${_rt_pg_listen%:*} ;;
+    esac
+    _rt_pg_ip=${_rt_pg_ip:-127.0.0.1}
     _rt_pg_ca=''
     if [ "$_rt_pg_tls" = true ] && [ -n "${RT_TLS_CERT_STATE:-}" ]; then
         _rt_pg_ca="$(dirname "$RT_TLS_CERT_STATE")/ca.crt"
@@ -1798,6 +1753,7 @@ print_guidance() {
         print_proxy_hint
     fi
     if [ "$RT_VERBOSE" = 1 ]; then print_sudo_guide; fi
+    fw_check "$_rt_pg_port"
 }
 
 # ---------------------------------------------------------------------------
@@ -1872,7 +1828,8 @@ cmd_install() {
     esac
     detail "平台：$(uname -s)/$RT_ARCH；安装范围：$RT_SCOPE"
 
-    # --- 已装则先停服务、保留既有 token ---
+    # --- 读取已有安装信息，下载校验期间保持服务运行 ---
+    _rt_i_existing=0
     _rt_i_prev_scope=''
     if [ -f "$RT_STATE_FILE" ]; then
         _rt_i_prev_scope=$(sed -n 's/^SCOPE=//p' "$RT_STATE_FILE" 2>/dev/null | head -n1 || true)
@@ -1880,10 +1837,8 @@ cmd_install() {
             die "$EX_CONFLICT" "安装范围冲突：已安装为 $_rt_i_prev_scope，本次指定 $RT_SCOPE；请先执行 $RT_NAME uninstall"
         fi
         load_state
+        _rt_i_existing=1
         detail "检测到既有安装，将保留配置和 token"
-        if svc_active; then
-            svc_stop || die "$EX_SERVICE" "无法停止现有服务，安装已中止"
-        fi
     else
         RT_INIT=$(detect_init)
     fi
@@ -1923,6 +1878,9 @@ cmd_install() {
     info '正在安装文件并配置服务…'
     _rt_i_owner=''
     if [ "$RT_SCOPE" = system ]; then _rt_i_owner='root:root'; fi
+    if [ "$_rt_i_existing" = 1 ] && svc_active; then
+        svc_stop || die "$EX_SERVICE" "无法停止现有服务，安装已中止"
+    fi
     install_one_binary "$RT_DL_AGENT" "$RT_BIN_AGENT" "$_rt_i_owner"
     detail "agent 已安装：$RT_BIN_AGENT"
     if [ -n "$RT_DL_CLIENT" ]; then
@@ -1950,10 +1908,6 @@ cmd_install() {
         priv install -d -m 0755 -o root -g root "$RT_STATE_DIR" 2>/dev/null || true
     else
         mkdir -p "$RT_CONF_DIR" 2>/dev/null || true
-        # 幂等收紧：保留旧配置的升级安装走 agent_init_config 的 conf_exists 早退，
-        # 不会执行其 chmod 0700，目录会停留在 umask 默认（如 775）——token 文件名因此对
-        # 同机其他用户可见。此处无条件收紧到 700。
-        chmod 0700 "$RT_CONF_DIR" 2>/dev/null || true
         chmod 0700 "$RT_CONF_DIR" 2>/dev/null || true
     fi
 
@@ -2035,21 +1989,10 @@ cmd_install() {
     if [ "$RT_INIT" = systemd ] && [ "$RT_SCOPE" = user ]; then
         priv mkdir -p "$(dirname "$RT_UNIT")" 2>/dev/null || true
     fi
-    install_service_unit
-    svc_daemon_reload
+    install_service_unit || die "$EX_SERVICE" '无法配置服务'
+    svc_daemon_reload || die "$EX_SERVICE" '无法重新加载服务配置'
 
-    # --- 步骤 8：防火墙、启动、健康检查 ---
-    detail "[8/8] 配置防火墙并启动服务"
-    if [ "$RT_NO_FIREWALL" = 1 ]; then
-        detail "已按 --no-firewall 跳过防火墙配置，请确认 $RT_PORT_STATE/tcp 可达"
-        RT_FW_APPLIED=false
-        RT_FW_BACKEND='none'
-    elif [ "${RT_FW_APPLIED:-false}" = true ] && [ "${RT_FW_RULE:-}" != '' ] \
-        && [ "$(state_get PORT)" = "$RT_PORT_STATE" ]; then
-        detail "既有防火墙规则已覆盖 $RT_PORT_STATE/tcp"
-    else
-        fw_apply "$RT_PORT_STATE"
-    fi
+    detail "[8/8] 启动服务并做本机健康检查"
     if ! svc_start; then
         RT_LAST_ERROR='start failed'
         err "服务启动失败"
@@ -2060,7 +2003,7 @@ cmd_install() {
     if ! health_check "$RT_LISTEN_STATE"; then
         RT_LAST_ERROR='healthz failed'
         warn "健康检查未通过：$RT_LISTEN_STATE/healthz 无响应"
-        hint "请执行 $RT_NAME logs，并检查防火墙和端口占用"
+        hint "请执行 $RT_NAME logs，并检查本机监听和端口占用"
         state_write || true
         exit "$EX_HEALTH"
     fi
@@ -2070,6 +2013,7 @@ cmd_install() {
     RT_LAST_UPGRADE_RESULT='ok'
     state_write
     ok "安装完成：rtctl-agent $RT_AGENT_VERSION"
+    ok "本机健康检查通过"
     print_guidance
     log_line "action=install result=ok listen=$RT_LISTEN_STATE port=$RT_PORT_STATE tls=$RT_TLS_ENABLED allow_sudo=$RT_ALLOW_SUDO_STATE"
     return 0
@@ -2220,7 +2164,7 @@ cmd_disable() {
 }
 
 # ---------------------------------------------------------------------------
-# upgrade：停 -> 原子替换 -> 起 -> 健康检查 -> 失败回滚
+# upgrade：准备并校验 -> 备份 -> 停 -> 替换并验证 -> 失败时恢复并验证
 # ---------------------------------------------------------------------------
 detach_run() {
     if [ "$RT_INIT" = systemd ] && have systemd-run; then
@@ -2243,7 +2187,7 @@ cmd_upgrade() {
     resolve_release_tag
     RT_TAG=$RT_TAG_OUT
     _rt_u_cur=${RT_AGENT_VERSION:-unknown}
-    if [ "$RT_TAG" = "$_rt_u_cur" ] || [ "v$RT_TAG" = "$_rt_u_cur" ] || [ "$RT_TAG" = "v$_rt_u_cur" ]; then
+    if [ "${RT_TAG#v}" = "${_rt_u_cur#v}" ]; then
         say "已是最新：$RT_TAG（当前 $_rt_u_cur）"
         return 0
     fi
@@ -2252,68 +2196,100 @@ cmd_upgrade() {
         return 0
     fi
     if [ "${RT_DETACHED:-0}" != 1 ] && [ -f "$0" ]; then
-        _rt_u_args="upgrade --detached --yes --release $RT_TAG --scope $RT_SCOPE"
-        if [ -n "$RT_BASE_URL" ]; then _rt_u_args="$_rt_u_args --base-url $RT_BASE_URL"; fi
-        if [ -n "$RT_PROXY" ]; then _rt_u_args="$_rt_u_args --proxy $RT_PROXY"; fi
-        # shellcheck disable=SC2086
-        detach_run /bin/sh "$0" $_rt_u_args || die "$EX_SERVICE" "无法启动后台升级"
+        set -- upgrade --detached --yes --release "$RT_TAG" --scope "$RT_SCOPE"
+        if [ -n "$RT_BASE_URL" ]; then set -- "$@" --base-url "$RT_BASE_URL"; fi
+        if [ -n "$RT_PROXY" ]; then set -- "$@" --proxy "$RT_PROXY"; fi
+        detach_run /bin/sh "$0" "$@" || die "$EX_SERVICE" "无法启动后台升级"
         ok "升级已在后台启动，当前会话可以安全退出"
         say "查看进度：$RT_NAME logs    安装日志：tail -f $RT_LOG_FILE"
         return 0
     fi
     lock_acquire
+    state_require
+    if [ "${RT_TAG#v}" = "${RT_AGENT_VERSION#v}" ]; then
+        say "已是最新：$RT_TAG（当前 $RT_AGENT_VERSION）"
+        return 0
+    fi
     if ! detect_arch; then
         die "$EX_PLATFORM" "不支持的架构：$(uname -m)"
     fi
     RT_ARCH=$RT_ARCH_OUT
-    svc_stop || die "$EX_SERVICE" "停止服务失败，升级中止"
     fetch_assets "$RT_TAG" "$RT_ARCH"
     _rt_u_newsha=$(sha256_of "$RT_DL_AGENT" || true)
-    if [ -f "$RT_BIN_AGENT" ]; then
-        priv cp -p "$RT_BIN_AGENT" "$RT_BIN_AGENT.prev" || die "$EX_FAIL" "备份当前二进制失败"
-        RT_PREV_BINARY="$RT_BIN_AGENT.prev"
-    fi
+    [ -n "$_rt_u_newsha" ] || die "$EX_CHECKSUM" '无法计算新 agent 的 SHA256，升级中止'
     _rt_u_owner=''
     if [ "$RT_SCOPE" = system ]; then _rt_u_owner='root:root'; fi
-    atomic_put "$RT_DL_AGENT" "$RT_BIN_AGENT" 0755 "$_rt_u_owner" || die "$EX_FAIL" "替换二进制失败"
-    if [ -n "$RT_DL_CLIENT" ]; then atomic_put "$RT_DL_CLIENT" "$RT_BIN_CLIENT" 0755 "$_rt_u_owner" || true; fi
-    _rt_u_selfsrc=$RT_DL_SCRIPT
-    if [ -z "$_rt_u_selfsrc" ]; then _rt_u_selfsrc=$(self_script_source || true); fi
-    if [ -n "$_rt_u_selfsrc" ]; then atomic_put "$_rt_u_selfsrc" "$RT_BIN_DIR/$RT_NAME" 0755 "$_rt_u_owner" || true; fi
-    probe_agent_caps "$RT_BIN_AGENT"
-    RT_AGENT_VERSION=$(agent_version_of "$RT_BIN_AGENT")
-    RT_AGENT_SHA256=$_rt_u_newsha
-    install_service_unit
-    svc_daemon_reload
-    if svc_start && health_check "$RT_LISTEN_STATE"; then
+    RT_PREV_BINARY=''
+    if [ -f "$RT_BIN_AGENT" ]; then
+        atomic_put "$RT_BIN_AGENT" "$RT_BIN_AGENT.prev" 0755 "$_rt_u_owner" \
+            || die "$EX_FAIL" '备份当前 agent 失败，升级中止'
+        RT_PREV_BINARY="$RT_BIN_AGENT.prev"
+    fi
+    svc_stop || die "$EX_SERVICE" '停止服务失败，升级中止'
+
+    _rt_u_failure=''
+    if ! atomic_put "$RT_DL_AGENT" "$RT_BIN_AGENT" 0755 "$_rt_u_owner"; then
+        _rt_u_failure='无法替换 agent 二进制'
+    else
+        probe_agent_caps "$RT_BIN_AGENT"
+        RT_AGENT_VERSION=$(agent_version_of "$RT_BIN_AGENT")
+        RT_AGENT_SHA256=$_rt_u_newsha
+        if ! install_service_unit || ! svc_daemon_reload; then
+            _rt_u_failure='无法加载新版本的服务配置'
+        elif ! svc_start; then
+            _rt_u_failure='新版本服务启动失败'
+        elif ! health_check "$RT_LISTEN_STATE" || ! svc_active; then
+            _rt_u_failure='新版本未通过健康检查'
+        fi
+    fi
+    if [ -z "$_rt_u_failure" ]; then
+        if [ -n "$RT_DL_CLIENT" ]; then
+            atomic_put "$RT_DL_CLIENT" "$RT_BIN_CLIENT" 0755 "$_rt_u_owner" || warn '客户端更新失败'
+        fi
+        _rt_u_selfsrc=$RT_DL_SCRIPT
+        if [ -z "$_rt_u_selfsrc" ]; then _rt_u_selfsrc=$(self_script_source || true); fi
+        if [ -n "$_rt_u_selfsrc" ]; then
+            atomic_put "$_rt_u_selfsrc" "$RT_BIN_DIR/$RT_NAME" 0755 "$_rt_u_owner" || warn '管理命令更新失败'
+        fi
         RT_UPGRADED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '')
         RT_LAST_UPGRADE_RESULT='ok'
-        state_write || true
+        RT_LAST_ERROR=''
+        state_write
         ok "升级完成：$RT_TAG"
         log_line "action=upgrade result=ok version=$RT_TAG"
         return 0
     fi
-    warn "升级后健康检查失败，开始回滚"
-    if [ -f "$RT_PREV_BINARY" ]; then
-        atomic_put "$RT_PREV_BINARY" "$RT_BIN_AGENT" 0755 "$_rt_u_owner" || true
+    warn "$_rt_u_failure，开始回滚"
+    RT_LAST_UPGRADE_RESULT='rollback_failed'
+    if [ -z "$RT_PREV_BINARY" ] || [ ! -f "$RT_PREV_BINARY" ]; then
+        _rt_u_recovery_error='找不到旧版 agent 备份'
+    elif ! atomic_put "$RT_PREV_BINARY" "$RT_BIN_AGENT" 0755 "$_rt_u_owner"; then
+        _rt_u_recovery_error='无法恢复旧版 agent 二进制'
+    else
         probe_agent_caps "$RT_BIN_AGENT"
         RT_AGENT_VERSION=$(agent_version_of "$RT_BIN_AGENT")
         RT_AGENT_SHA256=$(sha256_of "$RT_BIN_AGENT" || true)
-        install_service_unit
-        svc_daemon_reload
-        RT_ROLLBACK_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '')
-        RT_ROLLBACK_FROM_VERSION=$RT_TAG
-        RT_LAST_UPGRADE_RESULT='rolled_back'
-        RT_LAST_ERROR='health check failed after upgrade'
-        svc_restart >/dev/null 2>&1 || true
-        state_write || true
-        log_line "action=upgrade result=rolled_back version=$RT_TAG"
-        die "$EX_HEALTH" "升级失败，已回滚到上一版本（$RT_PREV_BINARY）；排错：$RT_NAME logs"
+        if ! install_service_unit || ! svc_daemon_reload; then
+            _rt_u_recovery_error='无法加载旧版本的服务配置'
+        elif ! svc_restart; then
+            _rt_u_recovery_error='旧版本服务重启失败'
+        elif ! health_check "$RT_LISTEN_STATE" || ! svc_active; then
+            _rt_u_recovery_error='旧版本未通过健康检查'
+        else
+            RT_ROLLBACK_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '')
+            RT_ROLLBACK_FROM_VERSION=$RT_TAG
+            RT_LAST_UPGRADE_RESULT='rolled_back'
+            RT_LAST_ERROR=$_rt_u_failure
+            state_write
+            log_line "action=upgrade result=rolled_back version=$RT_TAG"
+            die "$EX_HEALTH" '升级失败，已恢复上一版本且本机健康检查通过'
+        fi
     fi
-    RT_LAST_UPGRADE_RESULT='rollback_failed'
-    RT_LAST_ERROR='no .prev binary to roll back to'
-    state_write || true
-    die "$EX_HEALTH" "升级失败且没有可回滚的 .prev 二进制；请用 --agent-src 手工恢复"
+    RT_LAST_ERROR="$_rt_u_failure；$_rt_u_recovery_error"
+    state_write
+    log_line "action=upgrade result=rollback_failed version=$RT_TAG"
+    if [ -n "$RT_PREV_BINARY" ]; then hint "旧版本备份：$RT_PREV_BINARY"; fi
+    die "$EX_HEALTH" "升级失败且未能恢复服务：$_rt_u_recovery_error。请检查 $RT_NAME logs"
 }
 
 # ---------------------------------------------------------------------------
@@ -2335,33 +2311,34 @@ cmd_uninstall() {
         warn "无法把自身复制到 ${TMPDIR:-/tmp}，继续用当前进程执行（本次可完成，但脚本文件会被删除）"
     fi
     if [ "$RT_YES" != 1 ]; then
-        say "将要移除：服务单元 / 二进制 / 防火墙规则（配置默认保留）"
+        say "将要移除：服务单元和二进制（配置默认保留）"
         if [ "$RT_PURGE" = 1 ]; then warn "--purge：还会销毁 agent.conf（含 token）与状态目录、专用用户"; fi
         if ! ask_yn '确认卸载？' 'n'; then
             say '已取消'
             return 0
         fi
     fi
-    say '[1/7] 停止服务'
+    say '[1/6] 停止服务'
     svc_stop || warn "停止服务未成功，继续卸载"
     if svc_active; then
         warn "服务仍处于 active，先 disable 再继续（避免自动重启）"
     fi
-    say '[2/7] 关闭开机自启'
+    say '[2/6] 关闭开机自启'
     svc_disable >/dev/null 2>&1 || true
-    say '[3/7] 清理失败状态'
+    say '[3/6] 清理失败状态'
     svc_reset_failed
-    say '[4/7] 删除服务单元'
+    say '[4/6] 删除服务单元'
     svc_remove_unit
-    say '[5/7] 删除二进制'
+    say '[5/6] 删除二进制'
     for _rt_un_f in "$RT_BIN_AGENT" "$RT_BIN_AGENT.prev" "$RT_BIN_CLIENT" "$RT_BIN_CLIENT.prev" "$RT_BIN_DIR/$RT_NAME"; do
         if [ -n "$_rt_un_f" ] && [ -e "$_rt_un_f" ]; then
             priv rm -f "$_rt_un_f" && hint "已删除 $_rt_un_f"
         fi
     done
-    say '[6/7] 撤销防火墙规则'
-    fw_revoke
-    say '[7/7] 处理配置与状态'
+    if [ "${RT_FW_APPLIED:-false}" = true ] && [ -n "${RT_PORT_STATE:-}" ]; then
+        hint "旧版安装记录了 ${RT_FW_BACKEND:-系统防火墙} 的 TCP $RT_PORT_STATE 放行规则，卸载后请在现有防火墙中检查并按需移除"
+    fi
+    say '[6/6] 处理配置与状态'
     if [ "$RT_PURGE" = 1 ]; then
         if [ -f "$RT_CONF" ]; then
             if have shred; then priv shred -u "$RT_CONF" 2>/dev/null || priv rm -f "$RT_CONF"; else priv rm -f "$RT_CONF"; fi
@@ -3002,6 +2979,7 @@ cmd_doctor() {
     if [ "$RT_INIT" = nohup ] && [ ! -f /etc/cron.d/rtctl-agent ]; then
         doctor_warn "无 init 且无 @reboot：重启后不会自动拉起"
     fi
+    fw_check "$RT_PORT_STATE"
     say ''
     if [ "$doctor_fail" -gt 0 ]; then
         err "doctor：$doctor_fail 项未通过"
@@ -3075,9 +3053,13 @@ cmd_help() {
     say '  --scope system|user    系统级或用户级安装'
     say '  --tls-generate         生成自签 CA 和服务器证书'
     say '  --no-print-token       安装完成时不显示完整 token'
+    say '  --no-firewall          跳过防火墙检查和提示'
+    say '  --dev | --stable       安装或升级时选择 dev 测试版或稳定版'
+    say '  --release TAG          安装或升级到指定版本'
     say '  --yes  --quiet  --verbose'
     say ''
     say "示例：$RT_NAME install --tls-generate"
+    say "      $RT_NAME upgrade --dev --check"
     say "      $RT_NAME token show --reveal"
     say "      $RT_NAME sudo status"
     if [ "$RT_VERBOSE" != 1 ]; then
@@ -3089,8 +3071,9 @@ cmd_help() {
     say '完整选项（按命令支持）：'
     say '  --prefix DIR  --port N  --listen ADDR  --id NAME  --ws-path /rt/ws'
     say '  --tls-cert FILE --tls-key FILE  --allow-sudo  --sudo ask|nopasswd'
-    say '  --proxy-domain DOMAIN  --base-url URL  --release vX.Y.Z  --agent-src FILE'
-    say '  --pinned-sha256 HEX  --no-firewall  --allow-from CIDR  --proxy URL'
+    say '  --proxy-domain DOMAIN  --base-url URL  --agent-src FILE'
+    say '  --pinned-sha256 HEX  --proxy URL'
+    say '  --allow-from CIDR    在手工防火墙提示中指定来源网段'
     say '  --init systemd|openrc|nohup  --json'
     say ''
     say '退出码：'
@@ -3113,7 +3096,7 @@ cmd_not_implemented() {
 # ---------------------------------------------------------------------------
 rt_cmd_table() {
     cat <<'RTCTL_CMD_TABLE'
-install	cmd_install	high	yes	下载校验落盘、建用户/目录、配置、服务、防火墙、启动
+install	cmd_install	high	yes	下载安装、启动服务并检查本机健康状态
 init	cmd_init	mid	yes	生成 agent.conf 与 token（已存在则 exit 8）
 start	cmd_start	mid	yes	启动服务
 stop	cmd_stop	mid	yes	停止服务（不做 kill -9）
@@ -3122,7 +3105,7 @@ status	cmd_status	low	no	只读状态汇总
 logs	cmd_logs	low	no	查看日志（--follow 跟随，默认过滤 token）
 enable	cmd_enable	mid	yes	开机自启
 disable	cmd_disable	mid	yes	关闭开机自启
-upgrade	cmd_upgrade	high	yes	停服务 -> 原子替换 -> 健康检查 -> 失败回滚
+upgrade	cmd_upgrade	high	yes	下载校验后替换服务，失败时验证回滚结果
 uninstall	cmd_uninstall	high	yes	卸载（默认保留配置，--purge 才销毁）
 config	cmd_config	mid	yes	配置 show/get/set/edit（token 键一律拒绝）
 token	cmd_token	mid	yes	查看或轮换 token
@@ -3158,7 +3141,7 @@ RTCTL_TABLE
         exit "$EX_USAGE"
     fi
     RT_CMD=$_rt_dp_cmd
-    "$_rt_dp_handler"
+    "$_rt_dp_handler" "$@"
     return $?
 }
 
@@ -3216,6 +3199,13 @@ parse_args() {
             --proxy-domain) RT_PROXY_DOMAIN=$_rt_pa_val ;;
             --base-url) RT_BASE_URL=${_rt_pa_val%/} ;;
             --release) RT_RELEASE=$_rt_pa_val ;;
+            --dev|--stable)
+                _rt_pa_channel=${_rt_pa_arg#--}
+                if [ -n "$RT_RELEASE_CHANNEL" ] && [ "$RT_RELEASE_CHANNEL" != "$_rt_pa_channel" ]; then
+                    die "$EX_USAGE" '--dev 和 --stable 只能选择一个'
+                fi
+                RT_RELEASE_CHANNEL=$_rt_pa_channel
+                ;;
             --pinned-sha256) RT_PINNED=$_rt_pa_val ;;
             --init)
                 case "$_rt_pa_val" in
@@ -3336,6 +3326,7 @@ rt_init_defaults() {
     RT_PROXY_DOMAIN=''
     RT_BASE_URL=''
     RT_RELEASE=''
+    RT_RELEASE_CHANNEL=''
     RT_PINNED=''
     RT_NO_FIREWALL=0
     RT_ALLOW_FROM=''
@@ -3361,8 +3352,6 @@ rt_init_defaults() {
     RT_ALLOW_SUDO_STATE=0
     RT_FW_APPLIED='false'
     RT_FW_BACKEND=''
-    RT_FW_RULE=''
-    RT_FW_UNDO=''
     RT_AUTOSTART='none'
     RT_AGENT_VERSION='unknown'
     RT_AGENT_SHA256=''
@@ -3422,12 +3411,19 @@ main() {
     if [ -z "$RT_CMD" ]; then
         RT_CMD='install'
     fi
+    if [ -n "$RT_RELEASE_CHANNEL" ]; then
+        [ -z "$RT_RELEASE" ] || die "$EX_USAGE" '--dev 或 --stable 不能与 --release 同时使用'
+        case "$RT_CMD" in
+            install|upgrade) : ;;
+            *) die "$EX_USAGE" '--dev 和 --stable 仅用于 install 或 upgrade' ;;
+        esac
+    fi
     if [ "$RT_SCOPE" = system ] && [ "$RT_EUID" = 0 ]; then
         priv mkdir -p "$RT_LOG_DIR" 2>/dev/null || true
         priv chmod 0750 "$RT_LOG_DIR" 2>/dev/null || true
         priv chown root:root "$RT_LOG_DIR" 2>/dev/null || true
     fi
-    rt_dispatch "$RT_CMD"
+    rt_dispatch "$RT_CMD" "$@"
     exit $?
 }
 
