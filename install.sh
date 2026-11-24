@@ -963,7 +963,7 @@ upgrade_channel() {
 resolve_dev_release() {
     rt_tmpfile
     _rt_rd_file=$RT_TMPFILE
-    if ! dl_url "https://api.github.com/repos/$RT_REPO/releases?per_page=100" "$_rt_rd_file"; then
+    if ! dl_url "https://api.github.com/repos/$RT_REPO/releases?per_page=100" "$_rt_rd_file" 'Dev 版本列表'; then
         rm -f "$_rt_rd_file"
         die "$EX_DOWNLOAD" '无法查询 GitHub 测试版，请用 --release 指定已知的 dev 版本'
     fi
@@ -1004,12 +1004,16 @@ resolve_release_tag() {
         return 0
     fi
     _rt_rrt_loc=''
+    if [ "$RT_QUIET" = 0 ]; then printf '查询 Release 版本  %s/latest\n' "$RT_RELEASES" >&2; fi
     if have curl; then
-        _rt_rrt_loc=$(curl -fsSI --max-time 20 "$RT_RELEASES/latest" 2>/dev/null \
+        set -- -fsSI --max-time 20
+        if [ -n "$RT_PROXY" ]; then set -- "$@" -x "$RT_PROXY"; fi
+        _rt_rrt_loc=$(curl "$@" "$RT_RELEASES/latest" \
             | sed -n 's/^[Ll]ocation: //p' | tr -d '\r' | tail -n1 || true)
     fi
     if [ -z "$_rt_rrt_loc" ] && have wget; then
-        _rt_rrt_loc=$(wget -qS --max-redirect=0 --spider "$RT_RELEASES/latest" 2>&1 \
+        _rt_rrt_loc=$(if [ -n "$RT_PROXY" ]; then export https_proxy="$RT_PROXY" http_proxy="$RT_PROXY"; fi
+            wget -qS -T 20 --max-redirect=0 --spider "$RT_RELEASES/latest" 2>&1 \
             | sed -n 's/.*[Ll]ocation: //p' | tr -d '\r' | tail -n1 || true)
     fi
     if [ -z "$_rt_rrt_loc" ]; then
@@ -1035,27 +1039,31 @@ detect_arch() {
     return 0
 }
 
-dl_url() {
+dl_url() (
     _rt_du_url=$1
     _rt_du_dst=$2
+    _rt_du_label=${3:-${_rt_du_url##*/}}
+    _rt_du_display=$(printf '%s\n' "$_rt_du_url" | sed 's|://[^/@]*@|://***@|g; s/[?#].*$//')
+    if [ "$RT_QUIET" = 0 ]; then printf '下载 %s  %s\n' "$_rt_du_label" "$_rt_du_display" >&2; fi
+    if [ -n "$RT_PROXY" ]; then export https_proxy="$RT_PROXY" http_proxy="$RT_PROXY"; fi
     if have curl; then
-        if [ -n "$RT_PROXY" ]; then
-            curl -fsSL --connect-timeout 15 --max-time 600 -x "$RT_PROXY" -o "$_rt_du_dst" "$_rt_du_url"
-        else
-            curl -fsSL --connect-timeout 15 --max-time 600 -o "$_rt_du_dst" "$_rt_du_url"
-        fi
-        return $?
+        set -- curl -fSL --connect-timeout 15 --max-time 600 -o "$_rt_du_dst"
+        if [ -n "$RT_PROXY" ]; then set -- "$@" -x "$RT_PROXY"; fi
+        if [ "$RT_QUIET" = 0 ] && [ -t 2 ]; then set -- "$@" --progress-bar; else set -- "$@" -s; fi
+    elif have wget; then
+        set -- wget -T 30 -O "$_rt_du_dst"
+        if [ "$RT_QUIET" = 1 ] || [ ! -t 2 ]; then set -- "$@" -q; fi
+    else
+        die "$EX_DOWNLOAD" "缺少 curl 与 wget，无法下载（可手动放置二进制后用 --agent-src）"
     fi
-    if have wget; then
-        if [ -n "$RT_PROXY" ]; then
-            https_proxy="$RT_PROXY" http_proxy="$RT_PROXY" wget -q -T 30 -O "$_rt_du_dst" "$_rt_du_url"
-        else
-            wget -q -T 30 -O "$_rt_du_dst" "$_rt_du_url"
-        fi
-        return $?
+    if "$@" "$_rt_du_url"; then
+        if [ "$RT_QUIET" = 0 ]; then printf '已下载 %s（%s 字节）\n' "$_rt_du_label" "$(wc -c <"$_rt_du_dst")" >&2; fi
+    else
+        _rt_du_rc=$?
+        printf '下载 %s 失败（%s 退出码 %s）  %s\n' "$_rt_du_label" "$1" "$_rt_du_rc" "$_rt_du_display" >&2
+        return "$_rt_du_rc"
     fi
-    die "$EX_DOWNLOAD" "缺少 curl 与 wget，无法下载（可手动放置二进制后用 --agent-src）"
-}
+)
 
 sums_expected() {
     _rt_se_asset=$1
@@ -1091,15 +1099,13 @@ fetch_assets() {
     chmod 0700 "$_rt_fa_dir" 2>/dev/null || true
     RT_DL_DIR=$_rt_fa_dir
     _rt_fa_sums="$_rt_fa_dir/SHA256SUMS.txt"
-    detail "下载校验清单：$_rt_fa_base/SHA256SUMS.txt"
     if ! dl_url "$_rt_fa_base/SHA256SUMS.txt" "$_rt_fa_sums"; then
-        die "$EX_DOWNLOAD" "下载 SHA256SUMS.txt 失败：$_rt_fa_base/SHA256SUMS.txt"
+        die "$EX_DOWNLOAD" "校验清单下载失败，安装已中止"
     fi
     if [ ! -s "$_rt_fa_sums" ]; then
         die "$EX_DOWNLOAD" "SHA256SUMS.txt 为空，请检查下载地址或代理返回的内容"
     fi
     _rt_fa_agent="$_rt_fa_dir/rtctl-agent-linux-$_rt_fa_arch"
-    detail "下载 agent：$_rt_fa_base/rtctl-agent-linux-$_rt_fa_arch"
     if ! dl_url "$_rt_fa_base/rtctl-agent-linux-$_rt_fa_arch" "$_rt_fa_agent"; then
         die "$EX_DOWNLOAD" "下载 agent 失败，请检查网络或使用 --proxy 指定代理"
     fi
@@ -1117,7 +1123,7 @@ fetch_assets() {
     RT_DL_AGENT=$_rt_fa_agent
     RT_DL_CLIENT=''
     _rt_fa_client="$_rt_fa_dir/rtctl-linux-$_rt_fa_arch"
-    if dl_url "$_rt_fa_base/rtctl-linux-$_rt_fa_arch" "$_rt_fa_client" 2>/dev/null && check_elf "$_rt_fa_client"; then
+    if dl_url "$_rt_fa_base/rtctl-linux-$_rt_fa_arch" "$_rt_fa_client" && check_elf "$_rt_fa_client"; then
         if verify_asset "$_rt_fa_client" "rtctl-linux-$_rt_fa_arch" "$_rt_fa_sums"; then
             RT_DL_CLIENT=$_rt_fa_client
             detail "客户端 rtctl 已下载并校验"
@@ -1129,7 +1135,7 @@ fetch_assets() {
     fi
     RT_DL_SCRIPT=''
     _rt_fa_script="$_rt_fa_dir/install.sh"
-    if dl_url "$_rt_fa_base/install.sh" "$_rt_fa_script" 2>/dev/null && [ -s "$_rt_fa_script" ]; then
+    if dl_url "$_rt_fa_base/install.sh" "$_rt_fa_script" && [ -s "$_rt_fa_script" ]; then
         if verify_asset "$_rt_fa_script" "install.sh" "$_rt_fa_sums"; then
             RT_DL_SCRIPT=$_rt_fa_script
         else

@@ -3,13 +3,26 @@ set -eu
 umask 077
 
 usage() {
-    printf '%s\n' '用法  sh bootstrap.sh [--stable|--dev] [install|upgrade] [选项]' >&2
+    printf '%s\n' '用法  sh bootstrap.sh [--stable|--dev] [--github-prefix URL] [install|upgrade] [选项]' >&2
 }
 
 channel=''
-case "${1:-}" in
-    --stable|--dev) channel=${1#--}; shift ;;
-esac
+tag=''
+github_prefix=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --stable|--dev) channel=${1#--}; shift ;;
+        --github-prefix)
+            github_prefix=${2:-}
+            case "$github_prefix" in
+                *'@'*|*'?'*|*'#'*|*[[:space:]]*) usage; exit 2 ;;
+                https://[[:alnum:]]*) github_prefix=${github_prefix%/} ;;
+                *) usage; exit 2 ;;
+            esac
+            shift 2 ;;
+        *) break ;;
+    esac
+done
 if [ -z "$channel" ]; then
     if ! (test -t 1 && true </dev/tty) 2>/dev/null; then
         usage
@@ -34,22 +47,73 @@ case "$1" in
     *) usage; exit 2 ;;
 esac
 
-download() {
+# Read download options without consuming the arguments forwarded to the installer.
+proxy=''
+quiet=0
+pinned_tag=''
+expect=''
+for arg do
+    case "$expect" in
+        proxy) proxy=$arg; expect=''; continue ;;
+        release) pinned_tag=$arg; expect=''; continue ;;
+    esac
+    case "$arg" in
+        --proxy) expect=proxy ;;
+        --proxy=*) proxy=${arg#*=} ;;
+        --release) expect=release ;;
+        --release=*) pinned_tag=${arg#*=} ;;
+        --quiet|-q) quiet=1 ;;
+    esac
+done
+[ -z "$expect" ] || { usage; exit 2; }
+
+download() (
+    url="${github_prefix:+$github_prefix/}$1"
+    dest=$2
+    label=$3
+    if [ "$quiet" = 0 ]; then printf '下载%s  %s\n' "$label" "$url" >&2; fi
+    if [ -n "$proxy" ]; then
+        https_proxy=$proxy http_proxy=$proxy
+        export https_proxy http_proxy
+    fi
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 2 --connect-timeout 15 --max-time 60 -o "$2" "$1"
+        set -- curl -fSL --retry 2 --connect-timeout 15 --max-time 60 -o "$dest"
+        if [ -n "$proxy" ]; then set -- "$@" -x "$proxy"; fi
+        if [ "$quiet" = 0 ] && [ -t 2 ]; then set -- "$@" --progress-bar; else set -- "$@" -s; fi
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -T 30 -O "$2" "$1"
+        set -- wget -T 30 -O "$dest"
+        if [ "$quiet" = 1 ] || [ ! -t 2 ]; then set -- "$@" -q; fi
     else
         printf '%s\n' 'curl or wget is required.' >&2
         return 1
     fi
-}
+    if "$@" "$url"; then
+        if [ "$quiet" = 0 ]; then printf '已下载%s（%s 字节）\n' "$label" "$(wc -c <"$dest")" >&2; fi
+    else
+        rc=$?
+        printf '下载%s失败（%s 退出码 %s）  %s\n' "$label" "$1" "$rc" "$url" >&2
+        if [ -n "$proxy" ]; then
+            printf '%s\n' '已使用 --proxy 指定的正向代理。若节点要求拼接 GitHub 原始链接，请在 install 或 upgrade 前使用 --github-prefix URL。' >&2
+        fi
+        return "$rc"
+    fi
+)
 
 work_dir=$(mktemp -d)
 trap 'rm -f "$work_dir/releases.json" "$work_dir/SHA256SUMS.txt" "$work_dir/install.sh"; rmdir "$work_dir"' 0
 trap 'exit 1' HUP INT TERM
-if [ "$channel" = dev ]; then
-    download 'https://api.github.com/repos/GotKiCry/rtctl/releases?per_page=100' "$work_dir/releases.json"
+if [ -n "$pinned_tag" ]; then
+    case "$pinned_tag" in *[!0-9a-z.-]*) usage; exit 2 ;; esac
+    pattern='^v[0-9]+\.[0-9]+\.[0-9]+$'
+    if [ "$channel" = dev ]; then pattern='^v[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$'; fi
+    printf '%s\n' "$pinned_tag" | grep -Eq "$pattern" || { printf '版本 %s 与所选渠道 %s 不匹配\n' "$pinned_tag" "$channel" >&2; exit 2; }
+    tag=$pinned_tag
+    base="https://github.com/GotKiCry/rtctl/releases/download/$tag"
+elif [ "$channel" = dev ]; then
+    download 'https://api.github.com/repos/GotKiCry/rtctl/releases?per_page=100' "$work_dir/releases.json" 'Dev 版本列表' || {
+        printf '%s\n' '可在 install 或 upgrade 后加 --release TAG 指定已知 Dev 版本并跳过版本查询。' >&2
+        exit 4
+    }
     tag=$(awk -F '"' '
         $2 == "tag_name" && $4 ~ /^v[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$/ {
             split(substr($4, 2), version, /[.-]/)
@@ -65,8 +129,8 @@ else
     base='https://github.com/GotKiCry/rtctl/releases/latest/download'
 fi
 
-download "$base/SHA256SUMS.txt" "$work_dir/SHA256SUMS.txt"
-download "$base/install.sh" "$work_dir/install.sh"
+download "$base/SHA256SUMS.txt" "$work_dir/SHA256SUMS.txt" '校验清单'
+download "$base/install.sh" "$work_dir/install.sh" '安装脚本'
 expected=$(awk '$2 == "install.sh" || $2 == "*install.sh" { print $1; exit }' "$work_dir/SHA256SUMS.txt")
 if command -v sha256sum >/dev/null 2>&1; then
     actual=$(sha256sum "$work_dir/install.sh" | awk '{ print $1 }')
@@ -82,12 +146,22 @@ if [ -z "$actual" ] || [ "$actual" != "$expected" ]; then
     printf '%s\n' 'SHA256 verification failed for the rtctl installer.' >&2
     exit 5
 fi
+installer_tag=$(sed -n "s/^RT_VERSION='\([^']*\)'$/\1/p" "$work_dir/install.sh" | head -n1)
+if [ -n "${tag:-}" ] && [ "$installer_tag" != "$tag" ]; then
+    printf '安装脚本版本不匹配：期望 %s，实际 %s\n' "$tag" "$installer_tag" >&2
+    exit 5
+fi
 if [ "$channel" = stable ]; then
-    tag=$(sed -n "s/^RT_VERSION='\([^']*\)'$/\1/p" "$work_dir/install.sh" | head -n1)
+    tag=$installer_tag
     if ! printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
         printf '%s\n' 'The stable installer has an invalid version.' >&2
         exit 4
     fi
 fi
 
+if [ -n "$github_prefix" ]; then
+    cmd=$1
+    shift
+    set -- "$cmd" --base-url "$github_prefix/https://github.com/GotKiCry/rtctl/releases/download/$tag" "$@"
+fi
 sh "$work_dir/install.sh" "$@" --release "$tag"

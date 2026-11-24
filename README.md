@@ -30,7 +30,7 @@
 新机器首次安装时，用 `sudo` 运行即可安装到系统级。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
+curl -fSL --progress-bar https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
   -o /tmp/rt-install.sh &&
 sudo sh /tmp/rt-install.sh
 ```
@@ -38,7 +38,7 @@ sudo sh /tmp/rt-install.sh
 首次安装到当前普通用户的账号时，直接运行同一脚本即可。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
+curl -fSL --progress-bar https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
   -o /tmp/rt-install.sh &&
 sh /tmp/rt-install.sh
 ```
@@ -49,7 +49,21 @@ sh /tmp/rt-install.sh
 
 从 `v1.0.2-dev.5` 起，安装器自动将管理命令所在目录写入登录环境的 `PATH`。系统级安装对所有用户生效（默认 `/usr/local/bin`），用户级安装仅对当前账号生效（默认 `~/.local/bin`）。重新登录后直接运行 `rt`。已打开的终端保留原环境，可立即使用 `/usr/local/bin/rt` 或 `~/.local/bin/rt`。两份并存时，用 `type -a rt` 查看查找顺序。
 
-默认只显示安装结果、连接信息和安全提示；添加 `--verbose` 可查看下载地址、哈希和服务单元等技术细节。
+引导脚本会显示正在下载的地址、终端传输进度和完成字节数。从 `v1.0.2-dev.7` 起，安装器下载二进制时也显示这些信息。失败时会指出具体文件和下载工具的退出码。`--verbose` 可查看哈希和服务单元等细节。
+
+目标机通过 HTTP 正向代理访问 GitHub 时，使用 `--proxy`。例如本机已运行端口为 7890 的代理：
+
+```sh
+sudo sh /tmp/rt-install.sh install --proxy http://127.0.0.1:7890
+```
+
+使用把 GitHub 原始链接拼在节点地址后面的下载加速服务时，将可信节点传给引导脚本的 `--github-prefix`。这也覆盖渠道查询和发布文件下载，仍可交互选择 Release 或 Dev：
+
+```sh
+sudo sh /tmp/rt-install.sh --github-prefix https://v4.gh-proxy.org/
+```
+
+若节点查询 Dev 版本列表时返回 403，可在上述命令末尾加 `install --release v1.0.2-dev.7`，选择 Dev 后直接下载指定版本。
 
 防火墙检查为只读。安装完成、`rt connect` 和 `rt doctor` 会提示如何从控制机验证连接，并根据目标机的防火墙给出手工检查或放行指引。已有规则由系统防火墙管理器维护。`--no-firewall` 可跳过检查和提示，`--allow-from CIDR` 可在手工指引中指定来源网段。
 
