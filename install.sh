@@ -499,6 +499,11 @@ load_state() {
     RT_AGENT_SHA256=$(state_get BINARY_SHA256)
     RT_TOKEN_FP=$(state_get TOKEN_FP)
     RT_INSTALLED_AT=$(state_get INSTALLED_AT)
+    RT_LAST_ERROR=$(state_get LAST_ERROR)
+    RT_LAST_UPGRADE_RESULT=$(state_get LAST_UPGRADE_RESULT)
+    RT_UPGRADED_AT=$(state_get UPGRADED_AT)
+    RT_ROLLBACK_AT=$(state_get ROLLBACK_AT)
+    RT_ROLLBACK_FROM_VERSION=$(state_get ROLLBACK_FROM_VERSION)
     RT_PREV_BINARY=$(state_get PREV_BINARY)
     return 0
 }
@@ -1369,7 +1374,7 @@ svc_pidfile_alive() {
     if [ -x "$RT_BIN_AGENT" ] && [ -r "/proc/$_rt_spa_pid/exe" ]; then
         _rt_spa_exe=$(readlink "/proc/$_rt_spa_pid/exe" 2>/dev/null || true)
         case "$_rt_spa_exe" in
-            "$RT_BIN_AGENT"*) return 0 ;;
+            "$RT_BIN_AGENT"|"$RT_BIN_AGENT (deleted)") return 0 ;;
             *) return 1 ;;
         esac
     fi
@@ -1510,6 +1515,25 @@ svc_restart() {
     esac
 }
 
+stop_for_replacement() {
+    svc_active || return 0
+    if [ "$RT_INIT" != systemd ]; then svc_stop; return $?; fi
+    _rt_old_pid=$(systemctl_do show "$RT_SVC_NAME" -p MainPID --value) || return 1
+    _rt_old_exe=$(priv readlink "/proc/$_rt_old_pid/exe" 2>/dev/null || true)
+    case "${_rt_old_exe% (deleted)}" in
+        "$RT_BIN_AGENT"|*/rtctl-agent|*/rtctl-agent-linux-amd64|*/rtctl-agent-linux-arm64) : ;;
+        *) die "$EX_CONFLICT" "同名单元 $RT_SVC_NAME 的 PID $_rt_old_pid（${_rt_old_exe:-未知}）无法确认为旧 agent，请检查服务配置" ;;
+    esac
+    _rt_old_inode=$(priv stat -Lc '%d:%i' "/proc/$_rt_old_pid/exe") || return 1
+    info "正在停止旧 agent（$RT_SVC_NAME，PID $_rt_old_pid）"
+    systemctl_do stop "$RT_SVC_NAME" || return 1
+    if [ "$(priv stat -Lc '%d:%i' "/proc/$_rt_old_pid/exe" 2>/dev/null || true)" = "$_rt_old_inode" ]; then
+        err "旧 agent（PID $_rt_old_pid）仍在运行，检查 $RT_SVC_NAME 的 KillMode 配置"
+        return 1
+    fi
+    return 0
+}
+
 svc_enable() {
     case "$RT_INIT" in
         systemd) systemctl_do enable "$RT_SVC_NAME" >/dev/null 2>&1 && RT_AUTOSTART='systemd' ;;
@@ -1565,23 +1589,13 @@ svc_remove_unit() {
 
 svc_logs() {
     _rt_sl_follow=${1:-0}
-    # 新版 agent 内置日志查看器（自带脱敏与终端着色）：日志来源是文件时优先使用
-    if [ "${RT_CAP_LOGS:-false}" = true ] && [ "$RT_LOG_SOURCE" = "$RT_SVC_LOG" ]; then
-        set -- -logs -log-file "$RT_SVC_LOG" -lines 200
-        if [ "$_rt_sl_follow" = 1 ]; then
-            set -- "$@" -follow
-        fi
-        "$RT_BIN_AGENT" "$@"
-        return $?
-    fi
-    if [ "$RT_INIT" = systemd ] && [ "${RT_CAP_FOREGROUND:-false}" != true ]; then
+    if [ "$RT_INIT" = systemd ] && { [ "$RT_LOG_SOURCE" = journald ] || [ ! -s "$RT_SVC_LOG" ] || [ ! -r "$RT_SVC_LOG" ]; }; then
         if ! have journalctl; then die "$EX_FAIL" "缺少 journalctl，无法读取 journald 日志"; fi
-        if [ "$_rt_sl_follow" = 1 ]; then
-            journalctl -u "$RT_SVC_NAME" -n 200 -f
-        else
-            journalctl -u "$RT_SVC_NAME" -n 200 --no-pager
-        fi
-        return 0
+        set -- -b -n 200 --no-pager
+        if [ "$RT_SCOPE" = user ]; then set -- --user "$@"; fi
+        if [ "$_rt_sl_follow" = 1 ]; then set -- "$@" -f; fi
+        journalctl "$@" -u "$RT_SVC_NAME.service"
+        return $?
     fi
     if [ ! -f "$RT_SVC_LOG" ]; then die "$EX_CONFLICT" "日志文件不存在：$RT_SVC_LOG"; fi
     if [ "$_rt_sl_follow" = 1 ]; then
@@ -1663,7 +1677,7 @@ fw_check() {
 # ---------------------------------------------------------------------------
 # 健康检查（/healthz；探活地址从 listen 推导）
 # ---------------------------------------------------------------------------
-health_check() {
+health_probe() {
     _rt_hc_listen=${1:-$RT_LISTEN_STATE}
     _rt_hc_port=$(port_from_listen "$_rt_hc_listen")
     [ -n "$_rt_hc_port" ] || _rt_hc_port=$RT_PORT_STATE
@@ -1675,27 +1689,24 @@ health_check() {
         _rt_hc_insecure='-k'
     fi
     _rt_hc_url="$_rt_hc_scheme://$_rt_hc_host:$_rt_hc_port/healthz"
+    if have curl; then
+        _rt_hc_body=$(curl -fsS --noproxy '*' $_rt_hc_insecure --max-time 2 --max-filesize 4096 "$_rt_hc_url" 2>/dev/null) || return 1
+    elif have wget; then
+        set -- -q -T 2 -O -
+        if [ "$_rt_hc_scheme" = https ]; then set -- "$@" --no-check-certificate; fi
+        _rt_hc_body=$(no_proxy='*' NO_PROXY='*' wget "$@" "$_rt_hc_url" 2>/dev/null | head -c 16)
+    else
+        return 1
+    fi
+    [ "$_rt_hc_body" = ok ]
+}
+
+health_check() {
     _rt_hc_i=0
     while [ "$_rt_hc_i" -lt 10 ]; do
-        # 探活走本机地址，必须绕过 http_proxy/HTTP_PROXY：带代理的机器上
-        # curl/wget 会把 127.0.0.1 的请求发给代理，造成"agent 正常却健康检查失败"的误判（exit 9）。
-        if have curl; then
-            if curl -fsS --noproxy '*' $_rt_hc_insecure --max-time 2 "$_rt_hc_url" >/dev/null 2>&1; then
-                return 0
-            fi
-        elif have wget; then
-            if [ "$_rt_hc_scheme" = https ]; then
-                if no_proxy='*' NO_PROXY='*' wget -q --no-check-certificate -T 2 -O /dev/null "$_rt_hc_url" 2>/dev/null; then return 0; fi
-            else
-                if no_proxy='*' NO_PROXY='*' wget -q -T 2 -O /dev/null "$_rt_hc_url" 2>/dev/null; then return 0; fi
-            fi
-        elif have nc; then
-            if nc -z -w 2 "$_rt_hc_host" "$_rt_hc_port" >/dev/null 2>&1; then return 0; fi
-        else
-            if port_in_use "$_rt_hc_port"; then return 0; fi
-        fi
+        if health_probe "$1"; then return 0; fi
         _rt_hc_i=$((_rt_hc_i + 1))
-        sleep 1
+        if [ "$_rt_hc_i" -lt 10 ]; then sleep 1; fi
     done
     return 1
 }
@@ -1724,7 +1735,9 @@ print_guidance() {
     _rt_pg_ws=${RT_WS_PATH_STATE:-/ws}
     _rt_pg_tls=${RT_TLS_ENABLED:-false}
     _rt_pg_status='未运行'
-    if svc_active; then _rt_pg_status='运行中'; fi
+    if svc_active; then
+        if health_probe "$_rt_pg_listen"; then _rt_pg_status='运行中'; else _rt_pg_status='未就绪'; fi
+    fi
     _rt_pg_enabled='否'
     if svc_enabled; then _rt_pg_enabled='是'; fi
     _rt_pg_rt=$RT_NAME
@@ -1948,7 +1961,6 @@ cmd_install() {
     detail "平台：$(uname -s)/$RT_ARCH；安装范围：$RT_SCOPE"
 
     # --- 读取已有安装信息，下载校验期间保持服务运行 ---
-    _rt_i_existing=0
     _rt_i_prev_scope=''
     if [ -f "$RT_STATE_FILE" ]; then
         _rt_i_prev_scope=$(sed -n 's/^SCOPE=//p' "$RT_STATE_FILE" 2>/dev/null | head -n1 || true)
@@ -1956,7 +1968,6 @@ cmd_install() {
             die "$EX_CONFLICT" "安装范围冲突：已安装为 $_rt_i_prev_scope，本次指定 $RT_SCOPE；请先执行 $RT_NAME uninstall"
         fi
         load_state
-        _rt_i_existing=1
         detail "检测到既有安装，将保留配置和 token"
     else
         RT_INIT=$(detect_init)
@@ -1997,9 +2008,7 @@ cmd_install() {
     info '正在安装文件并配置服务…'
     _rt_i_owner=''
     if [ "$RT_SCOPE" = system ]; then _rt_i_owner='root:root'; fi
-    if [ "$_rt_i_existing" = 1 ] && svc_active; then
-        svc_stop || die "$EX_SERVICE" "无法停止现有服务，安装已中止"
-    fi
+    stop_for_replacement || die "$EX_SERVICE" "无法停止现有服务，安装已中止"
     install_one_binary "$RT_DL_AGENT" "$RT_BIN_AGENT" "$_rt_i_owner"
     detail "agent 已安装：$RT_BIN_AGENT"
     if [ -n "$RT_DL_CLIENT" ]; then
@@ -2114,24 +2123,28 @@ cmd_install() {
     svc_daemon_reload || die "$EX_SERVICE" '无法重新加载服务配置'
 
     detail "[8/8] 启动服务并做本机健康检查"
-    if ! svc_start; then
+    [ -n "$RT_INSTALLED_AT" ] || RT_INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    _rt_i_token=$(token_value 2>/dev/null || true)
+    if [ -n "$_rt_i_token" ]; then RT_TOKEN_FP=$(fingerprint_of "$_rt_i_token"); fi
+    # daemon-reload 不会重启旧进程；restart 同时覆盖 inactive 和正在自动重启的单元。
+    if [ "$RT_INIT" = systemd ]; then _rt_i_start=svc_restart; else _rt_i_start=svc_start; fi
+    if ! "$_rt_i_start"; then
         RT_LAST_ERROR='start failed'
         err "服务启动失败"
         hint "查看日志：$RT_NAME logs    查看状态：$RT_NAME status"
         state_write || true
         exit "$EX_SERVICE"
     fi
-    if ! health_check "$RT_LISTEN_STATE"; then
+    if ! health_check "$RT_LISTEN_STATE" || ! svc_active; then
         RT_LAST_ERROR='healthz failed'
-        warn "健康检查未通过：$RT_LISTEN_STATE/healthz 无响应"
+        warn "服务未就绪：请检查 $RT_INIT 服务和本机 $_rt_hc_url"
         hint "请执行 $RT_NAME logs，并检查本机监听和端口占用"
         state_write || true
         exit "$EX_HEALTH"
     fi
     svc_enable >/dev/null 2>&1 || true
-    RT_INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '')
-    RT_TOKEN_FP=$(fingerprint_of "$(token_value 2>/dev/null || printf '')")
     RT_LAST_UPGRADE_RESULT='ok'
+    RT_LAST_ERROR=''
     state_write
     configure_login_path install || die "$EX_FAIL" "服务已安装，但无法持久化 PATH：$RT_BIN_DIR"
     ok "安装完成：rtctl-agent $RT_AGENT_VERSION"
@@ -2191,6 +2204,9 @@ cmd_init() {
 cmd_start() {
     state_require
     svc_start || die "$EX_SERVICE" "服务启动失败，请执行 $RT_NAME logs 查看日志"
+    if ! health_check "$RT_LISTEN_STATE" || ! svc_active; then
+        die "$EX_HEALTH" "服务未就绪，请执行 $RT_NAME logs 查看日志"
+    fi
     ok "服务已启动"
     log_line 'action=start result=ok'
 }
@@ -2205,7 +2221,7 @@ cmd_stop() {
 cmd_restart() {
     state_require
     svc_restart || die "$EX_SERVICE" "服务重启失败，请执行 $RT_NAME logs 查看日志"
-    if ! health_check "$RT_LISTEN_STATE"; then
+    if ! health_check "$RT_LISTEN_STATE" || ! svc_active; then
         die "$EX_HEALTH" "重启后健康检查未通过，请执行 $RT_NAME logs 查看日志"
     fi
     ok "服务已重启并通过健康检查"
@@ -2223,7 +2239,12 @@ cmd_status() {
     say "脚本版本   : $RT_VERSION"
     say "scope      : ${RT_SCOPE:-unknown}"
     say "服务后端   : ${RT_INIT:-unknown}"
-    say "服务状态   : $(if svc_active; then printf 'active'; else printf 'inactive'; fi)"
+    _rt_cs_status=inactive
+    if svc_active; then
+        _rt_cs_status='未就绪（服务管理器报告 active）'
+        if [ -n "${RT_PORT_STATE:-}" ] && health_probe "$RT_LISTEN_STATE"; then _rt_cs_status=active; fi
+    fi
+    say "服务状态   : $_rt_cs_status"
     say "开机自启   : $(if svc_enabled; then printf 'enabled'; else printf 'disabled'; fi)"
     say "监听       : ${RT_LISTEN_STATE:-unknown}（端口 ${RT_PORT_STATE:-unknown}，ws_path ${RT_WS_PATH_STATE:-/ws}）"
     say "agent 二进制: ${RT_BIN_AGENT:-unknown}（版本 ${RT_AGENT_VERSION:-unknown}）"
@@ -2235,23 +2256,25 @@ cmd_status() {
         say "配置目录   : $(priv stat -c '%a %U:%G' "$RT_CONF_DIR" 2>/dev/null || printf '?')"
     fi
     say "TLS        : ${RT_TLS_ENABLED:-unknown}"
+    _rt_cs_token=$(token_value 2>/dev/null || true)
+    if [ -n "$_rt_cs_token" ]; then RT_TOKEN_FP=$(fingerprint_of "$_rt_cs_token"); fi
     if [ "$RT_NO_PRINT_TOKEN" = 1 ]; then
         say 'token      : <已隐藏>'
     else
-        _rt_cs_token=$(token_value 2>/dev/null || true)
         say "token      : ${_rt_cs_token:-<不可读取>}"
     fi
     say "token 指纹 : ${RT_TOKEN_FP:-unknown}"
-    say "安装时间   : ${RT_INSTALLED_AT:-unknown}"
+    say "安装时间   : ${RT_INSTALLED_AT:-未记录}"
+    if [ -n "${RT_LAST_ERROR:-}" ]; then say "最近一次安装或升级错误 : $RT_LAST_ERROR"; fi
     if [ -n "${RT_PORT_STATE:-}" ]; then
         if port_in_use "$RT_PORT_STATE"; then
-            say "端口占用   : 已被监听（正常）"
+            say "端口占用   : 已被监听"
         else
             say "端口占用   : 未监听（服务可能未运行）"
         fi
     fi
     if [ "$_rt_cs_have" = 1 ]; then
-        if svc_active; then :; else
+        if [ "$_rt_cs_status" != active ]; then
             hint "启动：$RT_NAME start   排错：$RT_NAME logs"
         fi
     else
@@ -2268,8 +2291,10 @@ cmd_status() {
 cmd_logs() {
     state_require
     # 内置查看器自己脱敏：再走管道会把 stdout 变成非终端，颜色自动失效
-    if [ "${RT_CAP_LOGS:-false}" = true ] && [ "$RT_LOG_SOURCE" = "$RT_SVC_LOG" ]; then
-        svc_logs "${RT_FOLLOW:-0}"
+    if [ "${RT_CAP_LOGS:-false}" = true ] && [ "$RT_LOG_SOURCE" = "$RT_SVC_LOG" ] && [ -s "$RT_SVC_LOG" ] && [ -r "$RT_SVC_LOG" ]; then
+        set -- -logs -log-file "$RT_SVC_LOG" -lines 200
+        if [ "${RT_FOLLOW:-0}" = 1 ]; then set -- "$@" -follow; fi
+        "$RT_BIN_AGENT" "$@"
     else
         svc_logs "${RT_FOLLOW:-0}" | sanitize_text
     fi
@@ -2401,7 +2426,7 @@ cmd_upgrade() {
             || die "$EX_FAIL" '备份当前 agent 失败，升级中止'
         RT_PREV_BINARY="$RT_BIN_AGENT.prev"
     fi
-    svc_stop || die "$EX_SERVICE" '停止服务失败，升级中止'
+    stop_for_replacement || die "$EX_SERVICE" '停止服务失败，升级中止'
 
     _rt_u_failure=''
     if ! atomic_put "$RT_DL_AGENT" "$RT_BIN_AGENT" 0755 "$_rt_u_owner"; then
@@ -3061,7 +3086,10 @@ cmd_doctor() {
             *) doctor_warn "配置目录权限异常：$_rt_dc_dperm（期望 $_rt_dc_want_dir）" ;;
         esac
     fi
-    if svc_active; then doctor_ok "服务 active（$RT_INIT）"; else doctor_bad "服务未运行（$RT_NAME start，排错 $RT_NAME logs）"; fi
+    if ! svc_active; then doctor_bad "服务未运行（$RT_NAME start，排错 $RT_NAME logs）"
+    elif health_probe "$RT_LISTEN_STATE"; then doctor_ok "服务 active，本机 /healthz 已就绪（$RT_INIT）"
+    else doctor_bad "服务管理器报告 active，本机 /healthz 未就绪（排错 $RT_NAME logs）"
+    fi
     if svc_enabled; then doctor_ok "开机自启 enabled"; else doctor_warn "开机自启未启用（$RT_NAME enable）"; fi
     _rt_dc_port=${RT_PORT_STATE:-$(port_from_listen "${RT_LISTEN_STATE:-}")}
     if [ -n "$_rt_dc_port" ]; then
