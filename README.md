@@ -25,23 +25,25 @@
 
 ### 1. 在 Linux 目标设备安装 agent
 
-安装器会先让你选择 `1 Release`（稳定版）或 `2 Dev`（测试版）。要使用下文的 `rt` 互动菜单，请选择 `Dev`。自动化场景可在 `install` 前加 `--stable` 或 `--dev` 明确指定渠道。
+运行引导脚本后，选择 `1 Release`（稳定版）或 `2 Dev`（测试版）。要使用下文的 `rt` 互动菜单，请选择 `Dev`。
 
-系统级安装（推荐）：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
-  -o /tmp/rt-install.sh &&
-sudo sh /tmp/rt-install.sh install --scope system
-```
-
-用户级安装（不需要 root）：
+新机器首次安装时，用 `sudo` 运行即可安装到系统级。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
   -o /tmp/rt-install.sh &&
-sh /tmp/rt-install.sh install --scope user
+sudo sh /tmp/rt-install.sh
 ```
+
+首次安装到当前普通用户的账号时，直接运行同一脚本即可。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
+  -o /tmp/rt-install.sh &&
+sh /tmp/rt-install.sh
+```
+
+机器上已有安装时，脚本先查系统级安装记录，再查当前运行账号的用户级记录。若已有系统级安装，还要给当前普通用户单独装一份，运行 `sh /tmp/rt-install.sh install --scope user`。
 
 安装脚本会下载并校验对应架构的二进制，生成随机端口和 token，配置服务并执行健康检查。系统级安装创建专用 `rtctl` 用户；用户级安装使用当前用户。
 
@@ -165,7 +167,7 @@ sudo sh /tmp/rt-bootstrap.sh upgrade --check
 sudo sh /tmp/rt-bootstrap.sh upgrade
 ```
 
-引导脚本会在当前终端等待升级结果。全新安装使用 `sudo sh /tmp/rt-bootstrap.sh install`。非交互场景在子命令前加 `--stable` 或 `--dev`。用户级安装去掉 `sudo` 并加 `--scope user`。系统级安装完成后用 `sudo rt version --scope system` 确认版本。
+引导脚本会在当前终端等待升级结果。非交互运行时，把 `--stable` 或 `--dev` 放在子命令前，例如 `sudo sh /tmp/rt-bootstrap.sh --dev upgrade`。升级当前账号的用户级安装时可运行 `sh /tmp/rt-bootstrap.sh upgrade --scope user`。系统级升级完成后用 `sudo rt version` 确认版本。
 
 使用 `v1.0.0` 及后续版本时：
 
