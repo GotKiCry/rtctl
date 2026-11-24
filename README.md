@@ -32,12 +32,7 @@
 ```bash
 curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
   -o /tmp/rt-install.sh &&
-sudo sh /tmp/rt-install.sh install --scope system &&
-[ -x /usr/local/bin/rt ] &&
-case ":$PATH:" in
-  *:/usr/local/bin:*) ;;
-  *) export PATH="${PATH:+$PATH:}/usr/local/bin" ;;
-esac
+sudo sh /tmp/rt-install.sh install --scope system
 ```
 
 用户级安装（不需要 root）：
@@ -45,17 +40,12 @@ esac
 ```bash
 curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
   -o /tmp/rt-install.sh &&
-sh /tmp/rt-install.sh install --scope user &&
-[ -x "$HOME/.local/bin/rt" ] &&
-case ":$PATH:" in
-  *":$HOME/.local/bin:"*) ;;
-  *) export PATH="${PATH:+$PATH:}$HOME/.local/bin" ;;
-esac
+sh /tmp/rt-install.sh install --scope user
 ```
 
 安装脚本会下载并校验对应架构的二进制，生成随机端口和 token，配置服务并执行健康检查。系统级安装创建专用 `rtctl` 用户；用户级安装使用当前用户。
 
-上述命令只在安装成功后把缺失的目录追加到当前终端的 `PATH`。系统级脚本位于 `/usr/local/bin/rt`，用户级脚本位于 `~/.local/bin/rt`。两份并存时可用 `type -a rt` 查看查找顺序，用 `sudo /usr/local/bin/rt` 或 `~/.local/bin/rt` 指定要运行的脚本。
+从 `v1.0.2-dev.5` 起，安装器自动将管理命令所在目录写入登录环境的 `PATH`。系统级安装对所有用户生效（默认 `/usr/local/bin`），用户级安装仅对当前账号生效（默认 `~/.local/bin`）。重新登录后直接运行 `rt`。已打开的终端保留原环境，可立即使用 `/usr/local/bin/rt` 或 `~/.local/bin/rt`。两份并存时，用 `type -a rt` 查看查找顺序。
 
 默认只显示安装结果、连接信息和安全提示；添加 `--verbose` 可查看下载地址、哈希和服务单元等技术细节。
 

@@ -1825,6 +1825,88 @@ install_one_binary() {
     return 0
 }
 
+# 只编辑带 rtctl 标记的 PATH 行；跟随 dotfiles 的符号链接，保留原有配置。
+update_path_profile() {
+    _rt_pp_action=$1
+    _rt_pp_file=$2
+    if [ -L "$_rt_pp_file" ]; then
+        _rt_pp_file=$(readlink -f "$_rt_pp_file") || return 1
+    fi
+    if [ -f "$_rt_pp_file" ]; then
+        if [ "$_rt_pp_action" = install ] && priv grep -Fxq "$RT_PATH_LINE" "$_rt_pp_file"; then
+            return 0
+        fi
+        if priv grep -q ' ;; esac # rtctl-managed PATH$' "$_rt_pp_file"; then
+            priv sed -i '/ ;; esac # rtctl-managed PATH$/d' "$_rt_pp_file" || return 1
+        elif [ "$_rt_pp_action" = remove ]; then
+            return 0
+        fi
+    elif [ "$_rt_pp_action" = install ]; then
+        _rt_pp_mask=077
+        if [ "$RT_SCOPE" = system ]; then _rt_pp_mask=022; fi
+        priv sh -c 'umask "$2"; set -C; : >"$1"' sh "$_rt_pp_file" "$_rt_pp_mask" || return 1
+    fi
+    if [ "$_rt_pp_action" = remove ]; then
+        if [ "$2" = /etc/profile.d/rtctl-path.sh ] && [ -f "$2" ] && [ ! -s "$2" ]; then
+            priv rm -f "$2" || return 1
+        fi
+        return 0
+    fi
+    priv sh -c '
+        if [ -s "$1" ] && [ "$(tail -c 1 "$1" | wc -l)" -eq 0 ]; then
+            printf "\n" >>"$1" || exit 1
+        fi
+        printf "%s\n" "$2" >>"$1"
+    ' sh "$_rt_pp_file" "$RT_PATH_LINE"
+}
+
+configure_login_path() {
+    _rt_lp_action=$1
+    if [ "$_rt_lp_action" = install ]; then
+        [ -x "$RT_BIN_DIR/$RT_NAME" ] || return 0
+        _rt_lp_dir=$(CDPATH= cd -P "$RT_BIN_DIR" && pwd -P) || return 1
+        case "$_rt_lp_dir" in *:*|*'
+'*) warn '安装目录包含冒号或换行，无法加入 PATH'; return 1 ;; esac
+        if [ "$RT_SCOPE" = system ]; then
+            # 全局 PATH 也会被 root 使用。逐层检查实际目录，避免引入其他用户可写的位置。
+            _rt_lp_parent=$_rt_lp_dir
+            while [ -n "$_rt_lp_parent" ]; do
+                _rt_lp_unsafe=$(find "$_rt_lp_parent" -prune \( ! -user root -o -perm -0020 -o -perm -0002 \) -print) || return 1
+                if [ -n "$_rt_lp_unsafe" ]; then
+                    warn "系统 PATH 要求目录归 root 所有且其他用户不可写：$_rt_lp_parent"
+                    return 1
+                fi
+                _rt_lp_parent=${_rt_lp_parent%/*}
+            done
+        fi
+        _rt_lp_quoted=$(printf '%s' "$_rt_lp_dir" | sed "s/'/'\\\\''/g")
+        RT_PATH_LINE="case \":\${PATH-}:\" in *:'$_rt_lp_quoted':*) ;; *) export PATH=\"\${PATH:+\$PATH:}\"'$_rt_lp_quoted' ;; esac # rtctl-managed PATH"
+    fi
+    if [ "$RT_SCOPE" = system ]; then
+        set -- /etc/profile.d/rtctl-path.sh
+        if [ "$_rt_lp_action" = install ] && [ ! -d /etc/profile.d ]; then
+            priv sh -c 'umask 022; mkdir -p /etc/profile.d' || return 1
+        fi
+        if [ -d /etc/zsh ]; then set -- "$@" /etc/zsh/zprofile
+        elif [ -f /etc/zprofile ] || have zsh; then set -- "$@" /etc/zprofile
+        fi
+    else
+        set -- "$RT_HOME_DIR/.profile"
+        # Bash 登录时只读第一个存在的文件，创建 .bash_profile 会遮蔽原有 .profile。
+        for _rt_lp_bash in "$RT_HOME_DIR/.bash_profile" "$RT_HOME_DIR/.bash_login"; do
+            if [ -f "$_rt_lp_bash" ]; then set -- "$@" "$_rt_lp_bash"; fi
+        done
+        _rt_lp_zprofile="${ZDOTDIR:-$RT_HOME_DIR}/.zprofile"
+        if [ -f "$_rt_lp_zprofile" ] || have zsh; then set -- "$@" "$_rt_lp_zprofile"; fi
+    fi
+    for _rt_lp_file do
+        update_path_profile "$_rt_lp_action" "$_rt_lp_file" || {
+            warn "无法更新 PATH 配置：$_rt_lp_file"
+            return 1
+        }
+    done
+}
+
 cmd_install() {
     [ "$RT_SCOPE" = system ] && require_root_or_die
     if ! have curl && ! have wget; then
@@ -1855,7 +1937,7 @@ cmd_install() {
         detail "安装器提权方式：sudo（$RT_SUDO_MODE）"
     fi
     if [ "$RT_SCOPE" = system ]; then
-        priv mkdir -p "$RT_BIN_DIR" || die "$EX_FAIL" "无法创建 $RT_BIN_DIR"
+        priv sh -c 'umask 022; mkdir -p "$1"' sh "$RT_BIN_DIR" || die "$EX_FAIL" "无法创建 $RT_BIN_DIR"
         priv mkdir -p "$RT_LOG_DIR" 2>/dev/null || true
         priv chmod 0750 "$RT_LOG_DIR" 2>/dev/null || true
         priv chown root:root "$RT_LOG_DIR" 2>/dev/null || true
@@ -2051,12 +2133,13 @@ cmd_install() {
     RT_TOKEN_FP=$(fingerprint_of "$(token_value 2>/dev/null || printf '')")
     RT_LAST_UPGRADE_RESULT='ok'
     state_write
+    configure_login_path install || die "$EX_FAIL" "服务已安装，但无法持久化 PATH：$RT_BIN_DIR"
     ok "安装完成：rtctl-agent $RT_AGENT_VERSION"
     ok "本机健康检查通过"
     if [ -x "$RT_BIN_DIR/$RT_NAME" ]; then
         case ":$RT_CALLER_PATH:" in
             *":$RT_BIN_DIR:"*) : ;;
-            *) hint "使用完整路径打开管理菜单：$RT_BIN_DIR/$RT_NAME" ;;
+            *) hint "重新登录后可直接输入 $RT_NAME；当前终端可执行 $RT_BIN_DIR/$RT_NAME" ;;
         esac
     fi
     print_guidance
@@ -2350,6 +2433,7 @@ cmd_upgrade() {
         RT_LAST_UPGRADE_RESULT='ok'
         RT_LAST_ERROR=''
         state_write
+        configure_login_path install || die "$EX_FAIL" "服务已升级，但无法持久化 PATH：$RT_BIN_DIR"
         ok "升级完成：$RT_TAG"
         log_line "action=upgrade result=ok version=$RT_TAG"
         return 0
@@ -2426,6 +2510,7 @@ cmd_uninstall() {
     say '[4/6] 删除服务单元'
     svc_remove_unit
     say '[5/6] 删除二进制'
+    configure_login_path remove || warn '部分 rtctl PATH 配置未能清理'
     for _rt_un_f in "$RT_BIN_AGENT" "$RT_BIN_AGENT.prev" "$RT_BIN_CLIENT" "$RT_BIN_CLIENT.prev" "$RT_BIN_DIR/$RT_NAME"; do
         if [ -n "$_rt_un_f" ] && [ -e "$_rt_un_f" ]; then
             priv rm -f "$_rt_un_f" && hint "已删除 $_rt_un_f"
