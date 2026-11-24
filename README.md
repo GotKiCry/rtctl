@@ -1,6 +1,6 @@
 # rtctl
 
-[最新版本](https://github.com/GotKiCry/rtctl/releases/latest) · [变更记录](CHANGELOG.md) · [开发说明](CONTRIBUTING.md) · [安全政策](SECURITY.md) · [MIT 许可证](LICENSE)
+[最新稳定版](https://github.com/GotKiCry/rtctl/releases/latest) · [所有发布版本](https://github.com/GotKiCry/rtctl/releases) · [变更记录](CHANGELOG.md) · [开发说明](CONTRIBUTING.md) · [安全政策](SECURITY.md) · [MIT 许可证](LICENSE)
 
 > **安全提示：rtctl 等同于远程 Shell。token 可以 agent 用户身份执行命令和传输文件；永久 sudo 还会开放 root。只应在可信设备上安装 agent，公网或共享网络必须启用 TLS。**
 
@@ -25,21 +25,37 @@
 
 ### 1. 在 Linux 目标设备安装 agent
 
+安装器会先让你选择 `1 Release`（稳定版）或 `2 Dev`（测试版）。要使用下文的 `rt` 互动菜单，请选择 `Dev`。自动化场景可在 `install` 前加 `--stable` 或 `--dev` 明确指定渠道。
+
 系统级安装（推荐）：
 
 ```bash
-curl -fsSL https://github.com/GotKiCry/rtctl/releases/latest/download/install.sh \
-  -o /tmp/rt-install.sh
-sudo sh /tmp/rt-install.sh
+curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
+  -o /tmp/rt-install.sh &&
+sudo sh /tmp/rt-install.sh install --scope system &&
+[ -x /usr/local/bin/rt ] &&
+case ":$PATH:" in
+  *:/usr/local/bin:*) ;;
+  *) export PATH="${PATH:+$PATH:}/usr/local/bin" ;;
+esac
 ```
 
 用户级安装（不需要 root）：
 
 ```bash
-sh /tmp/rt-install.sh install --scope user
+curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
+  -o /tmp/rt-install.sh &&
+sh /tmp/rt-install.sh install --scope user &&
+[ -x "$HOME/.local/bin/rt" ] &&
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="${PATH:+$PATH:}$HOME/.local/bin" ;;
+esac
 ```
 
 安装脚本会下载并校验对应架构的二进制，生成随机端口和 token，配置服务并执行健康检查。系统级安装创建专用 `rtctl` 用户；用户级安装使用当前用户。
+
+上述命令只在安装成功后把缺失的目录追加到当前终端的 `PATH`。系统级脚本位于 `/usr/local/bin/rt`，用户级脚本位于 `~/.local/bin/rt`。两份并存时可用 `type -a rt` 查看查找顺序，用 `sudo /usr/local/bin/rt` 或 `~/.local/bin/rt` 指定要运行的脚本。
 
 默认只显示安装结果、连接信息和安全提示；添加 `--verbose` 可查看下载地址、哈希和服务单元等技术细节。
 

@@ -3,14 +3,14 @@
 # rtctl 一键安装与管理脚本（Linux）—— 安装后命令名 rt
 #
 #   自举（推荐先落盘再执行）：
-#     curl -fsSL https://github.com/GotKiCry/rtctl/releases/latest/download/install.sh \
-#       -o /tmp/rt-install.sh && sudo sh /tmp/rt-install.sh
+#     curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
+#       -o /tmp/rt-install.sh && sudo sh /tmp/rt-install.sh install --scope system
 #
 #   便捷一行：
-#     curl -fsSL https://github.com/GotKiCry/rtctl/releases/latest/download/install.sh | sudo sh -s -- install --yes
+#     curl -fsSL https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh | sudo sh -s -- --stable install --yes
 #
 #   无 sudo 的机器（用户级安装）：
-#     sh /tmp/rt-install.sh --scope user
+#     sh /tmp/rt-install.sh install --scope user
 #
 # 硬约束（改这个文件前先读）：
 #   1. 纯 POSIX sh：只用 set -eu；禁止 pipefail / 数组 / [[ ]] / local；
@@ -19,7 +19,7 @@
 #      绝不从 stdin 读一个字节（无 tty 时全部走默认值）。
 #   3. 单文件 + 命令注册表（name<TAB>handler）
 #      驱动分发；未实现子命令统一 exit 11，未知子命令 exit 2。
-#   4. 不读任何环境变量作为输入；固定 PATH；umask 077；外部命令先 command -v。
+#   4. 固定命令搜索 PATH；调用时收到的 PATH 仅用于安装提示；umask 077。
 #   5. 原子替换：目标同目录 mktemp -> chmod/chown -> mv -f；SELinux 下 restorecon -F。
 #   6. 凡写 agent.conf 必收尾 install -m 0600 -o rtctl -g rtctl；
 #      /etc/rtctl 必须是 0750 root:rtctl 且先于 -init 创建。
@@ -27,6 +27,7 @@
 
 set -eu
 umask 077
+RT_CALLER_PATH=${PATH-}
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
@@ -41,7 +42,7 @@ RT_SVC_NAME='rtctl-agent'
 RT_SYSTEM_AGENT_LOG='/var/log/rtctl-agent/agent.log'
 RT_RUN_USER='rtctl'
 RT_RUN_GROUP='rtctl'
-RT_BOOTSTRAP_URL='https://github.com/GotKiCry/rtctl/releases/latest/download/install.sh'
+RT_BOOTSTRAP_URL='https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh'
 RT_REPO='GotKiCry/rtctl'
 RT_RELEASES='https://github.com/GotKiCry/rtctl/releases'
 RT_SUDOERS_SCRIPT='/etc/sudoers.d/rt-installer'
@@ -1862,10 +1863,6 @@ cmd_install() {
         mkdir -p "$RT_BIN_DIR" || die "$EX_FAIL" "无法创建 $RT_BIN_DIR"
         mkdir -p "$RT_STATE_DIR" 2>/dev/null || true
     fi
-    case ":$PATH:" in
-        *":$RT_BIN_DIR:"*) : ;;
-        *) warn "若安装后找不到 $RT_NAME，请将 $RT_BIN_DIR 加入 PATH" ;;
-    esac
     detail "平台：$(uname -s)/$RT_ARCH；安装范围：$RT_SCOPE"
 
     # --- 读取已有安装信息，下载校验期间保持服务运行 ---
@@ -2056,6 +2053,12 @@ cmd_install() {
     state_write
     ok "安装完成：rtctl-agent $RT_AGENT_VERSION"
     ok "本机健康检查通过"
+    if [ -x "$RT_BIN_DIR/$RT_NAME" ]; then
+        case ":$RT_CALLER_PATH:" in
+            *":$RT_BIN_DIR:"*) : ;;
+            *) hint "使用完整路径打开管理菜单：$RT_BIN_DIR/$RT_NAME" ;;
+        esac
+    fi
     print_guidance
     log_line "action=install result=ok listen=$RT_LISTEN_STATE port=$RT_PORT_STATE tls=$RT_TLS_ENABLED allow_sudo=$RT_ALLOW_SUDO_STATE"
     return 0
