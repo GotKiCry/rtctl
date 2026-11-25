@@ -146,13 +146,13 @@ rtctl 由两个二进制组成：
 
 ### 5.3 远程 sudo 授权
 
-使用 `-sudo` 执行 root 命令需要同时满足三层条件：
+Linux agent 已经以 root 身份运行时，会以现有身份执行命令，并丢弃冗余的 sudo 密码。普通账号使用 `-sudo` 需要满足以下条件：
 
 1. **agent 配置**：`allow_sudo = true`，默认关闭；
 2. **客户端确认**：交互终端需要 y/N 确认，程序调用必须显式指定 `-confirm-sudo`；
-3. **目标机授权**：永久授权需要 sudoers 免密规则，临时授权需要有效的 root 密码。
+3. **目标机授权**：操作系统的 sudo 策略允许该服务账号执行相应操作。
 
-永久授权通过 `sudo -n -- /bin/sh -c <命令>` 执行。临时授权由客户端使用 `-sudo-ask`（脚本使用 `-sudo-password-stdin`）取得密码，agent 再通过 `sudo -S` 读取。密码只用于本次提权，不写入配置或日志；未启用 TLS 时，密码会在网络中明文传输。agent 本身始终以普通用户运行，日志中的特权命令标记为 `(SUDO)`。
+管理命令 `rt sudo enable` 和 `rt sudo disable` 设置请求开关。系统已有免密授权时，agent 使用 `sudo -n`。需要密码时，客户端使用 `-sudo-ask` 或 `-sudo-password-stdin`，agent 通过 `sudo -S` 读取。传输密码应启用 TLS。
 
 ### 5.4 超时行为
 

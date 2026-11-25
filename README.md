@@ -2,7 +2,7 @@
 
 [最新稳定版](https://github.com/GotKiCry/rtctl/releases/latest) · [所有发布版本](https://github.com/GotKiCry/rtctl/releases) · [变更记录](CHANGELOG.md) · [开发说明](CONTRIBUTING.md) · [安全政策](SECURITY.md) · [MIT 许可证](LICENSE)
 
-> **安全提示：rtctl 等同于远程 Shell。token 可以 agent 用户身份执行命令和传输文件；永久 sudo 还会开放 root。只应在可信设备上安装 agent，公网或共享网络必须启用 TLS。**
+> **rtctl 提供远程 Shell。持有 token 的人拥有 agent 账号的权限。公网或共享网络必须启用 TLS。**
 
 ## 功能
 
@@ -27,7 +27,7 @@
 
 运行引导脚本后，选择 `1 Release`（稳定版）或 `2 Dev`（测试版）。要使用下文的 `rt` 互动菜单，请选择 `Dev`。
 
-新机器首次安装时，用 `sudo` 运行即可安装到系统级。
+在 Linux 上使用固定引导脚本安装。普通账号通过 `sudo` 启动引导时，agent 仍属于该普通账号。全新机器上直接以 root 登录安装，agent 属于 root。
 
 ```bash
 curl -fSL --progress-bar https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
@@ -35,19 +35,9 @@ curl -fSL --progress-bar https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/
 sudo sh /tmp/rt-install.sh
 ```
 
-首次安装到当前普通用户的账号时，直接运行同一脚本即可。
+引导脚本在 `/usr/local/bin/rt` 注册管理入口，普通账号也可直接运行脚本，在注册时按提示输入 sudo 密码。`rt` 和 `sudo rt` 管理同一用户服务，端口和 token 保存在该账号的 `~/.rtctl/agent.conf`。安装器将用户命令目录加入登录 PATH。
 
-```bash
-curl -fSL --progress-bar https://raw.githubusercontent.com/GotKiCry/rtctl/Linux/bootstrap.sh \
-  -o /tmp/rt-install.sh &&
-sh /tmp/rt-install.sh
-```
-
-机器上已有安装时，脚本先查系统级安装记录，再查当前运行账号的用户级记录。若已有系统级安装，还要给当前普通用户单独装一份，运行 `sh /tmp/rt-install.sh install --scope user`。
-
-安装脚本会下载并校验对应架构的二进制，生成随机端口和 token，配置服务并执行健康检查。系统级安装创建专用 `rtctl` 用户；用户级安装使用当前用户。
-
-从 `v1.0.2-dev.5` 起，安装器自动将管理命令所在目录写入登录环境的 `PATH`。系统级安装对所有用户生效（默认 `/usr/local/bin`），用户级安装仅对当前账号生效（默认 `~/.local/bin`）。重新登录后直接运行 `rt`。已打开的终端保留原环境，可立即使用 `/usr/local/bin/rt` 或 `~/.local/bin/rt`。两份并存时，用 `type -a rt` 查看查找顺序。
+旧机器只有系统级安装时继续维护该服务。若旧用户服务与系统服务同时存在，引导脚本会提示冲突。先确认要保留的端口和 token。保留用户服务时，用 `sudo /usr/local/bin/rt uninstall --scope system` 移除旧系统服务，再运行引导脚本。默认卸载保留旧配置。
 
 引导脚本会显示正在下载的地址、终端传输进度和完成字节数。从 `v1.0.2-dev.7` 起，安装器下载二进制时也显示这些信息。失败时会指出具体文件和下载工具的退出码。`--verbose` 可查看哈希和服务单元等细节。
 
@@ -72,11 +62,6 @@ sudo sh /tmp/rt-install.sh --github-prefix https://v4.gh-proxy.org/
 安装完成后会显示地址、token 和客户端命令。用 `rt status` 查看完整 token，用 `rt connect` 重看连接命令。
 
 ```bash
-# 系统级安装
-sudo rt connect
-sudo rt status
-
-# 用户级安装
 rt connect
 rt status
 ```
@@ -148,7 +133,9 @@ sudo rt uninstall              # 默认保留配置和 token
 
 在终端输入 `rt` 进入互动菜单，可查看状态和日志、切换渠道、检查更新、升级或卸载。选择 **8 修改配置** 可查看配置、修改端口或编辑配置文件。修改端口会保留绑定地址并重启服务，等价于 `rt config set port 9000 --restart`（将 9000 换成你的端口）。编辑文件后，可在同一菜单选择 **应用配置并重启**。
 
-菜单分别显示管理脚本和 agent 二进制的版本。用 `rt status --no-print-token` 查看配置监听地址，以及系统可查询到的进程监听地址。用 `rt menu --scope system|user` 明确选择安装范围。
+菜单分别显示管理脚本和 agent 二进制的版本。用 `rt status --no-print-token` 查看配置监听地址和实际监听地址。
+
+从 `v1.0.2-dev.9` 起，`rt sudo enable` 允许非 root agent 申请 sudo，`rt sudo disable` 关闭申请。是否授权、是否要求密码取决于目标机已有的 sudo 策略。旧版写入的免密规则可由管理员用 visudo 检查。已经以 root 身份运行的 agent 直接使用现有权限。执行管理命令时在前面加 `sudo` 不会改变 agent 的账号。
 
 ### 手工运行 agent
 

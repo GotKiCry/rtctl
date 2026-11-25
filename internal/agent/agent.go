@@ -169,11 +169,18 @@ func (a *Agent) handleExec(m proto.Msg, sink sendSink) {
 		sendExecOutput(sink, m.ID, "", true, 1, "exec payload 无效", proto.ErrorCodeBadPayload, false)
 		return
 	}
-	// 特权命令审批闸：sudo:true 且被控端未授权（-allow-sudo）→ 拒绝执行。
+	// root 已有权限，命令只应收到调用方提供的业务 stdin。
+	if runtime.GOOS == "linux" && os.Geteuid() == 0 {
+		p.Sudo = false
+	}
+	if !p.Sudo {
+		p.SudoPassword = ""
+	}
+	// 普通账号申请 sudo 时必须已经打开请求开关。
 	// Windows 例外：计划任务本身以 SYSTEM 运行，sudo 字段无提权含义，直接放行。
 	if p.Sudo && !a.AllowSudo && runtime.GOOS != "windows" {
 		sendExecOutput(sink, m.ID, "", true, 1,
-			"远程 sudo 未开启：请在目标机执行 rt sudo temp（临时）或 rt sudo enable（永久）",
+			"远程 sudo 请求已关闭：请在目标机执行 rt sudo enable",
 			proto.ErrorCodeSudoDisabled, false)
 		return
 	}

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"fmt"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -9,6 +11,48 @@ import (
 
 	"rtctl/internal/proto"
 )
+
+func TestLinuxSudoRequestUsesServiceIdentity(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux sudo policy")
+	}
+	a := New("test", "test")
+	for _, allow := range []bool{false, true} {
+		if allow && os.Geteuid() != 0 {
+			continue // Keep the test independent of the host's sudoers.
+		}
+		a.AllowSudo = allow
+		m, err := proto.WithPayload(proto.Msg{Type: proto.TypeExec, ID: "identity"},
+			proto.ExecPayload{Cmd: "cat", Stdin: "request-input", Sudo: true, SudoPassword: "unused-input"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sink := &fakeSink{}
+		a.handleExec(m, sink)
+		var data strings.Builder
+		var done proto.ExecOutputPayload
+		for _, msg := range sink.snapshot() {
+			var p proto.ExecOutputPayload
+			if err := msg.PayloadOf(&p); err != nil {
+				t.Fatal(err)
+			}
+			data.WriteString(p.Data)
+			if p.Done {
+				done = p
+			}
+		}
+		if !done.Done {
+			t.Fatal("missing completion")
+		}
+		if os.Geteuid() == 0 {
+			if done.ExitCode != 0 || done.ErrorCode != "" || data.String() != "request-input" {
+				t.Fatalf("root request: output=%q code=%s", data.String(), done.ErrorCode)
+			}
+		} else if done.ErrorCode != proto.ErrorCodeSudoDisabled || data.Len() != 0 {
+			t.Fatalf("unprivileged request: output=%q code=%s", data.String(), done.ErrorCode)
+		}
+	}
+}
 
 // fakeSink 收集所有发出消息的 sendSink 测试桩。
 type fakeSink struct {

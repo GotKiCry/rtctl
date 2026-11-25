@@ -50,22 +50,77 @@ esac
 # Read download options without consuming the arguments forwarded to the installer.
 proxy=''
 quiet=0
+check_only=0
 pinned_tag=''
+scope=''
 expect=''
 for arg do
     case "$expect" in
         proxy) proxy=$arg; expect=''; continue ;;
         release) pinned_tag=$arg; expect=''; continue ;;
+        scope) scope=$arg; expect=''; continue ;;
     esac
     case "$arg" in
         --proxy) expect=proxy ;;
         --proxy=*) proxy=${arg#*=} ;;
         --release) expect=release ;;
         --release=*) pinned_tag=${arg#*=} ;;
+        --scope) expect=scope ;;
+        --scope=*) scope=${arg#*=} ;;
         --quiet|-q) quiet=1 ;;
+        --check) check_only=1 ;;
     esac
 done
 [ -z "$expect" ] || { usage; exit 2; }
+case "$scope" in ''|system|user) : ;; *) usage; exit 2 ;; esac
+
+# Resolve the account before running even an older Release installer.
+uid=$(id -u)
+owner=$uid
+if [ "$uid" = 0 ]; then owner=${SUDO_UID:-0}; fi
+case "$owner" in ''|*[!0-9]*) usage; exit 2 ;; esac
+entry=/usr/local/bin/rt
+registered=$(sed -n '2s/^# rtctl user uid: //p' "$entry" 2>/dev/null || :)
+if [ -n "$registered" ]; then
+    case "$registered" in *[!0-9]*) exit 8 ;; esac
+    if [ "$uid" != 0 ] && [ "$registered" != "$uid" ]; then
+        printf '本机 rt 实例属于 UID %s，请由该账号或管理员操作。\n' "$registered" >&2
+        exit 8
+    fi
+    owner=$registered
+elif [ "$uid" = 0 ]; then
+    # Legacy installations have no public launcher. Discover existing owners before choosing one.
+    owners=$(getent passwd | while IFS=: read -r _ _ candidate _ _ dir _; do
+        if [ -f "$dir/.local/state/rtctl/install.env" ]; then printf '%s\n' "$candidate"; fi
+    done | sort -u)
+    case "$owners" in
+        *'
+'*) printf '%s\n' '检测到多个旧用户实例，请先保留其中一个再重试。' >&2; exit 8 ;;
+        '') : ;;
+        *) owner=$owners ;;
+    esac
+fi
+owner_name=$(id -nu "$owner") || exit 8
+owner_home=$(getent passwd "$owner" | cut -d: -f6)
+[ -n "$owner_home" ] || exit 8
+system_install=0
+if [ -f /etc/rtctl/install.env ] || [ -f /etc/systemd/system/rtctl-agent.service ] ||
+   [ -f /etc/init.d/rtctl-agent ] || { [ -d /etc/rtctl ] && [ -x /usr/local/bin/rtctl-agent ]; }; then
+    system_install=1
+fi
+if [ "$system_install" = 1 ]; then
+    if [ "$scope" = user ] || [ -f "$owner_home/.local/state/rtctl/install.env" ]; then
+        printf '%s\n' '检测到旧系统服务。保留用户服务时，请先用旧系统管理脚本卸载 system 实例，再运行引导脚本。' >&2
+        exit 8
+    fi
+    scope=system
+    [ "$uid" = 0 ] || { printf '%s\n' '维护已有系统服务请用 sudo 运行引导脚本。' >&2; exit 6; }
+elif [ "$scope" = system ]; then
+    printf '%s\n' '新安装使用用户服务，请去掉 --scope system。' >&2
+    exit 8
+else
+    scope=user
+fi
 
 download() (
     url="${github_prefix:+$github_prefix/}$1"
@@ -164,4 +219,68 @@ if [ -n "$github_prefix" ]; then
     shift
     set -- "$cmd" --base-url "$github_prefix/https://github.com/GotKiCry/rtctl/releases/download/$tag" "$@"
 fi
-sh "$work_dir/install.sh" "$@" --release "$tag"
+if [ "$scope" = user ]; then
+    # Publish only this fixed launcher. The user-owned manager is opened after dropping privileges.
+    if [ -z "$registered" ] && [ "$check_only" = 0 ]; then
+        if [ "$uid" = 0 ]; then set_entry() { /bin/sh -s -- "$owner"; }
+        else set_entry() { sudo -- /bin/sh -s -- "$owner"; }; fi
+        set_entry <<'RT_REGISTER'
+        set -eu
+        PATH=/usr/sbin:/usr/bin:/sbin:/bin
+        export PATH
+        owner=$1
+        case "$owner" in ''|*[!0-9]*) exit 2 ;; esac
+        getent passwd | while IFS=: read -r _ _ candidate _ _ dir _; do
+            if [ "$candidate" != "$owner" ] && [ -f "$dir/.local/state/rtctl/install.env" ]; then
+                printf '已有 UID %s 的 rt 服务，请使用该账号的实例。\n' "$candidate" >&2
+                exit 8
+            fi
+        done
+        entry=/usr/local/bin/rt
+        if [ ! -d /usr/local/bin ]; then install -d -m 0755 /usr/local/bin; fi
+        launcher=$(mktemp /usr/local/bin/.rt-user.XXXXXX)
+        trap 'rm -f "$launcher"' 0
+        {
+            printf '#!/bin/sh\n# rtctl user uid: %s\n' "$owner"
+            printf 'owner=%s\n' "$owner"
+            cat <<'RT_USER_ENTRY'
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+uid=$(id -u)
+if [ "$uid" != "$owner" ]; then
+    [ "$uid" = 0 ] || { printf 'rt 属于 UID %s，请使用该账号或 sudo rt。\n' "$owner" >&2; exit 6; }
+    account=$(id -nu "$owner")
+    if command -v runuser >/dev/null; then exec runuser -u "$account" -- "$0" "$@"; fi
+    exec sudo -H -u "#$owner" -- "$0" "$@"
+fi
+HOME=$(getent passwd "$owner" | cut -d: -f6)
+: "${HOME:?无法确定实例所属账号的主目录}"
+XDG_RUNTIME_DIR=/run/user/$owner
+export HOME XDG_RUNTIME_DIR
+state=$HOME/.local/state/rtctl/install.env
+bindir=$(sed -n 's/^BIN_DIR=//p' "$state" 2>/dev/null | head -n1)
+manager=${bindir:-$HOME/.local/bin}/rt
+if [ ! -x "$manager" ] || [ "$manager" -ef "$0" ]; then
+    printf '%s\n' '用户管理脚本缺失，请重新运行 rtctl 引导脚本。' >&2
+    exit 8
+fi
+exec "$manager" "$@" --scope user
+RT_USER_ENTRY
+        } >"$launcher"
+        chmod 0755 "$launcher"
+        if ! ln "$launcher" "$entry" 2>/dev/null; then
+            [ "$(sed -n '2s/^# rtctl user uid: //p' "$entry" 2>/dev/null)" = "$owner" ] ||
+                { printf '命令路径已被占用：%s\n' "$entry" >&2; exit 8; }
+        fi
+RT_REGISTER
+    fi
+    if [ "$uid" = 0 ] && [ "$owner" != 0 ]; then
+        chmod 0711 "$work_dir"
+        chmod 0644 "$work_dir/install.sh"
+        set -- env "HOME=$owner_home" "XDG_RUNTIME_DIR=/run/user/$owner" /bin/sh "$work_dir/install.sh" "$@" --release "$tag" --scope user
+        if command -v runuser >/dev/null; then runuser -u "$owner_name" -- "$@"; else sudo -H -u "#$owner" -- "$@"; fi
+        exit $?
+    fi
+fi
+sh "$work_dir/install.sh" "$@" --release "$tag" --scope "$scope"

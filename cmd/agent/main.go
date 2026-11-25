@@ -292,7 +292,7 @@ func runMain() int {
 	token := flag.String("token", "", "设备 token（或环境变量 RTCTL_TOKEN）")
 	tlsCert := flag.String("tls-cert", "", "TLS 证书路径（与 -tls-key 同时提供则启用 WSS）")
 	tlsKey := flag.String("tls-key", "", "TLS 私钥路径")
-	allowSudo := flag.Bool("allow-sudo", false, "允许远程 sudo（永久授权需 sudoers，临时授权需 root 密码；默认关闭）")
+	allowSudo := flag.Bool("allow-sudo", false, "允许非 root 服务账号申请 sudo，授权由本机 sudo 策略决定（默认关闭）")
 	firewallHint := flag.Bool("open-firewall", true, "显示防火墙提示（兼容旧参数名，仅提示）")
 	wsPath := flag.String("ws-path", "", "WebSocket 路径（默认 /ws；反向代理/路径前缀场景可改，如 /rt/ws）")
 	printToken := flag.Bool("print-token", true, "启动和 -status 输出完整 token；设为 false 可避免写入终端或日志")

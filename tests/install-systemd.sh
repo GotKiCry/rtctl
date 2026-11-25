@@ -118,6 +118,7 @@ echo 'PASS saved vs applied port, same-value restart and manual config edit'
 cp "$fixture/functions.sh" "$fixture/rt"
 cat >>"$fixture/rt" <<'TEST_MENU'
 home_dir() { RT_HOME_DIR=$RT_TEST_HOME; }
+legacy_system_installed() { return 1; }
 RT_SVC_NAME=$RT_TEST_SERVICE
 main "$@"
 TEST_MENU

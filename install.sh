@@ -1171,7 +1171,7 @@ detect_init() {
         return 0
     fi
     if [ "$RT_SCOPE" = user ]; then
-        if have systemctl && [ -d /run/systemd/system ]; then
+        if have systemctl && [ -d /run/systemd/system ] && systemctl --user show-environment >/dev/null 2>&1; then
             printf 'systemd'
             return 0
         fi
@@ -1718,8 +1718,7 @@ health_check() {
 print_sudo_guide() {
     say ''
     info '远程 sudo（默认关闭）'
-    hint "永久授权：$RT_NAME sudo enable    token 持有者可免密码获得 root"
-    hint "临时授权：$RT_NAME sudo temp      每次输入 root 密码，不写入 sudoers"
+    hint "允许申请权限：$RT_NAME sudo enable    请求由本机 sudo 策略审批"
     hint "关闭授权：$RT_NAME sudo disable"
 }
 
@@ -2547,7 +2546,8 @@ cmd_uninstall() {
     fi
     # 自删保护：先把自身 cp 到 $TMPDIR 再 exec
     if [ -f "$0" ] && [ "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")" = "$RT_BIN_DIR/$RT_NAME" ]; then
-        _rt_un_self="${TMPDIR:-/tmp}/rt-uninstall.$$.sh"
+        rt_tmpfile
+        _rt_un_self=$RT_TMPFILE
         if cp "$0" "$_rt_un_self" 2>/dev/null; then
             chmod 0700 "$_rt_un_self" 2>/dev/null || true
             exec /bin/sh "$_rt_un_self" "$@"
@@ -2623,6 +2623,11 @@ cmd_uninstall() {
     fi
     if [ -f "$RT_SUDOERS_SCRIPT" ]; then
         hint "脚本层免密规则仍在：sudo rm -f $RT_SUDOERS_SCRIPT"
+    fi
+    if [ "$RT_SCOPE" = user ] && [ "$(sed -n '2s/^# rtctl user uid: //p' /usr/local/bin/rt 2>/dev/null || :)" = "$RT_UID" ]; then
+        (as_root /bin/sh -c '
+            if [ "$(sed -n "2s/^# rtctl user uid: //p" /usr/local/bin/rt)" = "$1" ]; then rm -f /usr/local/bin/rt; fi
+        ' sh "$RT_UID") || warn '用户服务已卸载，管理员可清理共享入口 /usr/local/bin/rt'
     fi
     ok "卸载完成"
     log_line "action=uninstall result=ok purge=$RT_PURGE"
@@ -2889,118 +2894,27 @@ cmd_token() {
 }
 
 # ---------------------------------------------------------------------------
-# sudo：agent 层授权（永久 sudoers / 临时密码）
+# sudo：允许 agent 请求已有的 OS 权限
 # ---------------------------------------------------------------------------
-write_sudoers() {
-    _rt_ws_path_target=$1
-    _rt_ws_content=$2
-    if ! have visudo; then
-        die "$EX_FAIL" "缺少 visudo：拒绝在无法校验语法的情况下写 sudoers（语法错误会让全系统 sudo 失效）"
-    fi
-    rt_tmpfile
-    _rt_ws_tmp=$RT_TMPFILE
-    printf '%s\n' "$_rt_ws_content" >"$_rt_ws_tmp"
-    priv chown root:root "$_rt_ws_tmp" || true
-    priv chmod 0440 "$_rt_ws_tmp" || true
-    if ! priv visudo -cf "$_rt_ws_tmp" >/dev/null 2>&1; then
-        rm -f "$_rt_ws_tmp" 2>/dev/null || true
-        die "$EX_FAIL" "sudoers 语法校验失败（visudo -cf），已放弃写入"
-    fi
-    if ! atomic_put "$_rt_ws_tmp" "$_rt_ws_path_target" 0440 root:root; then
-        rm -f "$_rt_ws_tmp" 2>/dev/null || true
-        die "$EX_FAIL" "写入 sudoers 失败：$_rt_ws_path_target"
-    fi
-    rm -f "$_rt_ws_tmp" 2>/dev/null || true
-    ok "已写入 $_rt_ws_path_target（0440 root:root，visudo 校验通过）"
-}
-
 cmd_sudo() {
     _rt_sd_sub=${RT_SUB:-status}
     state_require
-    [ "$RT_SCOPE" = system ] && require_root_or_die
     case "$_rt_sd_sub" in
-        enable)
-            if [ -f "$RT_SUDOERS_AGENT" ] && [ "${RT_TEMP:-0}" != 1 ]; then
-                info "永久授权规则已存在：$RT_SUDOERS_AGENT"
-            fi
-            if [ "${RT_TEMP:-0}" = 1 ]; then
-                conf_set_key allow_sudo true
-                RT_ALLOW_SUDO_STATE=1
-                render_unit "$(conf_read_key listen)" "$(conf_read_key ws_path)" 1
-                svc_daemon_reload
-                svc_restart >/dev/null 2>&1 || warn "服务重启失败，请执行 $RT_NAME restart"
-                ok "已开启临时远程 sudo，未写入 sudoers"
-                hint "控制端：rtctl -server <地址> exec -token <token> -sudo -sudo-ask -c 'systemctl restart nginx'"
-                hint 'root 密码仅用于本次提权，不写入配置'
-                if [ "${RT_TLS_ENABLED:-false}" != true ]; then
-                    warn '当前未启用 TLS，root 密码可能在网络中被截获'
-                fi
-                return 0
-            fi
-            warn "永久授权后，任何持有本机 token 的人都能免密码获得 root"
-            if [ "$RT_YES" != 1 ]; then
-                if ! ask_yn '确认开启永久远程 sudo？' 'n'; then say '已取消'; return 0; fi
-            fi
-            write_sudoers "$RT_SUDOERS_AGENT" \
-                "$RT_RUN_USER ALL=(ALL) NOPASSWD: /bin/sh, /usr/bin/sh, /usr/bin/kill, /bin/kill"
-            conf_set_key allow_sudo true
-            RT_ALLOW_SUDO_STATE=1
-            render_unit "$(conf_read_key listen)" "$(conf_read_key ws_path)" 1
-            svc_daemon_reload
-            svc_restart >/dev/null 2>&1 || warn "服务重启失败，请执行 $RT_NAME restart"
-            ok "已开启永久远程 sudo，token 持有者可免密码获得 root"
-            log_line 'action=sudo.enable result=ok mode=permanent'
-            ;;
-        temp)
-            RT_TEMP=1
-            RT_SUB=enable
-            cmd_sudo
-            ;;
-        disable)
-            if [ -f "$RT_SUDOERS_AGENT" ]; then
-                priv rm -f "$RT_SUDOERS_AGENT" || warn "删除 $RT_SUDOERS_AGENT 失败"
-                detail "已删除 $RT_SUDOERS_AGENT"
-            fi
-            conf_set_key allow_sudo false
-            RT_ALLOW_SUDO_STATE=0
-            render_unit "$(conf_read_key listen)" "$(conf_read_key ws_path)" 0
-            svc_daemon_reload
-            svc_restart >/dev/null 2>&1 || warn "服务重启失败，请执行 $RT_NAME restart"
-            ok "已关闭远程 sudo"
-            log_line 'action=sudo.disable result=ok'
+        enable|temp|disable)
+            if [ "$_rt_sd_sub" = disable ]; then _rt_sd_value=false; else _rt_sd_value=true; fi
+            conf_set_key allow_sudo "$_rt_sd_value"
+            RT_RESTART=1
+            config_saved
+            ok "sudo 请求设置已应用：$_rt_sd_value"
             ;;
         status)
-            _rt_sd_as=$(conf_read_key allow_sudo)
-            _rt_sd_state='关闭'
-            case "$_rt_sd_as" in true|TRUE|True|1) _rt_sd_state='开启' ;; esac
-            hr
-            say "远程 sudo : $_rt_sd_state"
-            if [ -f "$RT_SUDOERS_AGENT" ]; then
-                say "永久授权 : 已启用（$RT_SUDOERS_AGENT）"
-                warn "当前 token 持有者可免密码获得 root"
+            say "服务账号   : $RT_RUN_USER"
+            say "允许申请 sudo : $(conf_read_key allow_sudo)"
+            if [ "$RT_RUN_USER" = root ]; then
+                hint '服务已使用 root 身份，无需申请 sudo'
             else
-                say "永久授权 : 未启用"
+                hint '普通命令使用服务账号权限。sudo 请求由本机 sudo 策略审批。'
             fi
-            if [ "$RT_INIT" = systemd ] && [ -f "$RT_UNIT" ]; then
-                detail "NoNewPrivileges=$(sed -n 's/^NoNewPrivileges=//p' "$RT_UNIT" 2>/dev/null | head -n1 || printf '?')"
-            fi
-            say "安装器免密 sudo : $(if [ -f "$RT_SUDOERS_SCRIPT" ]; then printf '已配置'; else printf '未配置'; fi)"
-            case "$_rt_sd_as" in
-                true|TRUE|True|1)
-                    if [ -f "$RT_SUDOERS_AGENT" ]; then
-                        hint "关闭永久授权：$RT_NAME sudo disable"
-                    else
-                        hint '临时授权客户端需同时使用 -sudo 和 -sudo-ask'
-                        if [ "${RT_TLS_ENABLED:-false}" != true ]; then
-                            warn '当前未启用 TLS，临时授权输入的 root 密码可能在网络中被截获'
-                        fi
-                    fi
-                    ;;
-                *)
-                    hint "临时开启：$RT_NAME sudo temp    永久开启：$RT_NAME sudo enable"
-                    ;;
-            esac
-            hr
             ;;
         *)
             die "$EX_USAGE" "用法：$RT_NAME sudo status|temp|enable|disable"
@@ -3187,7 +3101,7 @@ cmd_doctor() {
     _rt_dc_as=$(conf_read_key allow_sudo)
     case "$_rt_dc_as" in
         true|TRUE|True|1)
-            doctor_warn "allow_sudo=true：任何持有 token 的人都能提权到 root"
+            doctor_warn "allow_sudo=true：允许已认证的客户端向本机申请 sudo"
             if [ -f "$RT_SUDOERS_AGENT" ]; then doctor_warn "$RT_SUDOERS_AGENT 存在（永久授权，等价 root 通道）"; else doctor_ok "未写 sudoers（临时授权形态）"; fi
             if [ -f "${RT_UNIT:-}" ]; then
                 if grep -q '^NoNewPrivileges=yes' "$RT_UNIT" 2>/dev/null; then
@@ -3197,7 +3111,7 @@ cmd_doctor() {
             ;;
         *)
             if [ -f "$RT_SUDOERS_AGENT" ]; then
-                doctor_warn "$RT_SUDOERS_AGENT 存在但 allow_sudo=false：残留 root 通道，建议 $RT_NAME sudo disable"
+                doctor_warn "请管理员检查旧版免密配置 $RT_SUDOERS_AGENT"
             else
                 doctor_ok "提权关闭（allow_sudo=false）"
             fi
@@ -3468,8 +3382,7 @@ cmd_help() {
         sudo)
             say "用法  $RT_NAME sudo [子命令] [--scope system|user]"
             say '  status                 查看远程 sudo 状态（默认）'
-            say '  temp                   开启临时授权'
-            say '  enable [--yes|--temp]   开启永久授权，--temp 改用临时授权'
+            say '  enable | temp          允许申请 sudo，由系统审批'
             say '  disable                关闭远程 sudo'
             return
             ;;
@@ -3534,7 +3447,7 @@ cmd_help() {
     say '  version                           查看版本信息'
     say ''
     say '常用选项：'
-    say '  --scope system|user    系统级或用户级安装'
+    say '  --scope system|user    指定要维护的旧实例，新安装使用用户服务'
     say '  --tls-generate         生成自签 CA 和服务器证书'
     say '  --no-print-token       隐藏完整 token'
     say '  --no-firewall          跳过防火墙检查和提示'
@@ -3738,19 +3651,46 @@ parse_args() {
     return 0
 }
 
+legacy_system_installed() {
+    [ -f /etc/rtctl/install.env ] || [ -f /etc/systemd/system/rtctl-agent.service ] ||
+        [ -f /etc/init.d/rtctl-agent ] || { [ -d /etc/rtctl ] && [ -x /usr/local/bin/rtctl-agent ]; }
+}
+
 resolve_scope() {
-    if [ -n "$RT_SCOPE" ]; then return 0; fi
-    if [ -f /etc/rtctl/install.env ]; then
-        RT_SCOPE='system'
-        return 0
+    _rt_owner=$(sed -n '2s/^# rtctl user uid: //p' /usr/local/bin/rt 2>/dev/null || :)
+    if [ "$RT_EUID" = 0 ]; then _rt_login=${SUDO_UID:-0}; else _rt_login=$RT_UID; fi
+    case "$_rt_login" in ''|*[!0-9]*) die "$EX_USAGE" '无法识别发起 sudo 的账号' ;; esac
+    if [ -n "$_rt_owner" ] && [ "$_rt_owner" != "$_rt_login" ]; then
+        [ "$RT_EUID" = 0 ] || die "$EX_CONFLICT" "rt 实例属于 UID $_rt_owner，请由该账号或管理员操作"
+        _rt_login=$_rt_owner
     fi
-    home_dir
-    if [ -f "$RT_HOME_DIR/.local/state/rtctl/install.env" ]; then
-        RT_SCOPE='user'
-        return 0
+    case "$_rt_login" in ''|*[!0-9]*) die "$EX_CONFLICT" '无效的 rt 实例账号' ;; esac
+    if legacy_system_installed; then
+        _rt_account_home=$(getent passwd "$_rt_login" | cut -d: -f6)
+        if [ "$RT_SCOPE" = user ] || { [ -z "$RT_SCOPE" ] && [ -f "$_rt_account_home/.local/state/rtctl/install.env" ]; }; then
+            case "$RT_SCOPE:$RT_CMD" in
+                user:uninstall|user:stop|user:disable|user:config|user:status|user:version) : ;;
+                *) die "$EX_CONFLICT" '发现旧系统服务。请选择要保留的实例，使用 --scope system 或 --scope user 卸载另一份后重试。' ;;
+            esac
+        else
+            RT_SCOPE=system
+        fi
+    elif [ "$RT_SCOPE" = system ] && [ "$RT_CMD" != uninstall ]; then
+        die "$EX_CONFLICT" '新安装使用用户服务，请去掉 --scope system'
     fi
-    if [ "$RT_EUID" = 0 ]; then RT_SCOPE='system'; else RT_SCOPE='user'; fi
-    return 0
+    RT_SCOPE=${RT_SCOPE:-user}
+    if [ "$RT_SCOPE" = user ] && [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$RT_UID" ]; then
+        XDG_RUNTIME_DIR=/run/user/$RT_UID
+        export XDG_RUNTIME_DIR
+    fi
+    if [ "$RT_SCOPE" = user ] && [ "$RT_EUID" = 0 ] && [ "$_rt_login" != 0 ]; then
+        _rt_login_home=$(getent passwd "$_rt_login" | cut -d: -f6)
+        [ -n "$_rt_login_home" ] || die "$EX_FAIL" '找不到实例所属账号'
+        _rt_script=$(readlink -f "$0") || die "$EX_USAGE" '请先下载引导脚本，再运行安装'
+        set -- env "HOME=$_rt_login_home" "XDG_RUNTIME_DIR=/run/user/$_rt_login" /bin/sh "$_rt_script" "$@" --scope user
+        if have runuser; then exec runuser -u "$(id -nu "$_rt_login")" -- "$@"; fi
+        exec sudo -H -u "#$_rt_login" -- "$@"
+    fi
 }
 
 scope_paths() {
@@ -3903,14 +3843,18 @@ main() {
         RT_CMD=menu
     fi
     rt_open_tty
-    if [ "$RT_CMD" = menu ] && [ -z "$RT_SCOPE" ] && [ -d /etc/rtctl ] \
-        && [ "$(readlink -f "$0" 2>/dev/null || true)" = /usr/local/bin/rt ]; then
-        RT_SCOPE=system
-    fi
-    resolve_scope
-    scope_paths
     if [ -z "$RT_CMD" ]; then
         RT_CMD='install'
+    fi
+    resolve_scope "$@"
+    scope_paths
+    if [ "$RT_SCOPE" = system ] && [ "$RT_EUID" != 0 ]; then
+        if [ -x /usr/local/bin/rt ] && [ -z "$RT_PREFIX" ] && [ "$RT_CMD" != install ] && [ "$RT_CMD" != upgrade ]; then
+            if [ "$#" = 0 ]; then set -- menu; fi
+            as_root /usr/local/bin/rt "$@" --scope system
+            return $?
+        fi
+        die "$EX_NOROOT" '维护旧系统服务请用 sudo 再执行同一命令'
     fi
     if [ -n "$RT_RELEASE_CHANNEL" ]; then
         [ -z "$RT_RELEASE" ] || die "$EX_USAGE" '--dev 或 --stable 不能与 --release 同时使用'
