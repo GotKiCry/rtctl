@@ -495,7 +495,7 @@ load_state() {
     RT_FW_BACKEND=$(state_get FW_BACKEND)
     RT_FW_APPLIED=$(state_get FW_APPLIED)
     RT_AUTOSTART=$(state_get AUTOSTART)
-    RT_AGENT_VERSION=$(state_get AGENT_VERSION)
+    RT_AGENT_VERSION=$(agent_version_of "$RT_BIN_AGENT")
     RT_AGENT_SHA256=$(state_get BINARY_SHA256)
     RT_TOKEN_FP=$(state_get TOKEN_FP)
     RT_INSTALLED_AT=$(state_get INSTALLED_AT)
@@ -505,6 +505,11 @@ load_state() {
     RT_ROLLBACK_AT=$(state_get ROLLBACK_AT)
     RT_ROLLBACK_FROM_VERSION=$(state_get ROLLBACK_FROM_VERSION)
     RT_PREV_BINARY=$(state_get PREV_BINARY)
+    if [ -r "$RT_CONF" ]; then
+        RT_LISTEN_STATE=$(conf_read_key listen)
+        RT_LISTEN_STATE=${RT_LISTEN_STATE:-:8443}
+        RT_PORT_STATE=$(port_from_listen "$RT_LISTEN_STATE")
+    fi
     return 0
 }
 
@@ -711,7 +716,7 @@ conf_exists() {
 conf_read_key() {
     _rt_crk=$1
     _rt_crv=''
-    _rt_crv=$(sed -n "s/^[[:space:]]*${_rt_crk}[[:space:]]*=[[:space:]]*//p" "$RT_CONF" 2>/dev/null | head -n1 || true)
+    _rt_crv=$(sed -n "s/^[[:space:]]*${_rt_crk}[[:space:]]*=[[:space:]]*//p" "${2:-$RT_CONF}" 2>/dev/null | tail -n1 | sed 's/[[:space:]]*$//' || true)
     printf '%s' "$_rt_crv" | tr -d '\r'
 }
 
@@ -1225,9 +1230,6 @@ render_unit() {
     if [ "$RT_CAP_FOREGROUND" = true ]; then
         _rt_ru_extra="$_rt_ru_extra -foreground -log-file $RT_SVC_LOG"
     fi
-    if [ -n "$_rt_ru_ws" ] && [ "$_rt_ru_ws" != '/ws' ] && [ "$RT_CAP_WS_PATH" = true ]; then
-        _rt_ru_extra="$_rt_ru_extra -ws-path $_rt_ru_ws"
-    fi
     _rt_ru_nnp='yes'
     if [ "$_rt_ru_allow_sudo" = 1 ]; then _rt_ru_nnp='no'; fi
     _rt_ru_tmp=$(rt_tmpfile && printf '%s' "$RT_TMPFILE") || return 1
@@ -1301,9 +1303,6 @@ render_openrc() {
     if [ "$RT_CAP_PRINT_TOKEN" = true ]; then _rt_ro_extra="$_rt_ro_extra -print-token=false"; fi
     if [ "$RT_CAP_OPEN_FIREWALL" = true ]; then _rt_ro_extra="$_rt_ro_extra -open-firewall=false"; fi
     if [ "$RT_CAP_FOREGROUND" = true ]; then _rt_ro_extra="$_rt_ro_extra -foreground -log-file $RT_SVC_LOG"; fi
-    if [ -n "$RT_WS_PATH_STATE" ] && [ "$RT_WS_PATH_STATE" != '/ws' ] && [ "$RT_CAP_WS_PATH" = true ]; then
-        _rt_ro_extra="$_rt_ro_extra -ws-path $RT_WS_PATH_STATE"
-    fi
     {
         printf '#!/sbin/openrc-run\n'
         printf '# 由 %s %s 生成并托管\n' "$RT_NAME" "$RT_VERSION"
@@ -1445,9 +1444,6 @@ svc_nohup_start() {
     if [ "$RT_CAP_PRINT_TOKEN" = true ]; then _rt_ns_extra="$_rt_ns_extra -print-token=false"; fi
     if [ "$RT_CAP_OPEN_FIREWALL" = true ]; then _rt_ns_extra="$_rt_ns_extra -open-firewall=false"; fi
     if [ "$RT_CAP_FOREGROUND" = true ]; then _rt_ns_extra="$_rt_ns_extra -foreground -log-file $RT_SVC_LOG"; fi
-    if [ -n "$RT_WS_PATH_STATE" ] && [ "$RT_WS_PATH_STATE" != '/ws' ] && [ "$RT_CAP_WS_PATH" = true ]; then
-        _rt_ns_extra="$_rt_ns_extra -ws-path $RT_WS_PATH_STATE"
-    fi
     if ! have setsid; then
         warn "缺少 setsid：agent 未脱离进程组，经 rtctl exec 触发的启动可能被一起杀掉"
     fi
@@ -2252,7 +2248,13 @@ cmd_status() {
     fi
     say "服务状态   : $_rt_cs_status"
     say "开机自启   : $(if svc_enabled; then printf 'enabled'; else printf 'disabled'; fi)"
-    say "监听       : ${RT_LISTEN_STATE:-unknown}（端口 ${RT_PORT_STATE:-unknown}，ws_path ${RT_WS_PATH_STATE:-/ws}）"
+    say "配置监听   : ${RT_LISTEN_STATE:-unknown}（端口 ${RT_PORT_STATE:-unknown}，ws_path ${RT_WS_PATH_STATE:-/ws}）"
+    _rt_cs_pid=$(service_main_pid 2>/dev/null || true)
+    if [ -n "$_rt_cs_pid" ] && [ "$_rt_cs_pid" != 0 ] && have ss; then
+        _rt_cs_bound=$(ss -H -ltnp 2>/dev/null | awk -v p="pid=$_rt_cs_pid," 'index($0,p) {print $4}' | paste -sd ' ' -)
+        if [ -n "$_rt_cs_bound" ]; then say "进程监听   : $_rt_cs_bound（PID $_rt_cs_pid）"; fi
+    fi
+    if running_image_differs; then warn '运行中的服务与磁盘上的 agent 二进制不一致'; fi
     say "agent 二进制: ${RT_BIN_AGENT:-unknown}（版本 ${RT_AGENT_VERSION:-unknown}）"
     say "配置文件   : ${RT_CONF:-unknown}"
     if [ -n "${RT_CONF:-}" ] && [ -f "$RT_CONF" ]; then
@@ -2331,9 +2333,13 @@ cmd_disable() {
 # ---------------------------------------------------------------------------
 # upgrade：准备并校验 -> 备份 -> 停 -> 替换并验证 -> 失败时恢复并验证
 # ---------------------------------------------------------------------------
+manager_version() {
+    sed -n "s/^RT_VERSION='\([^']*\)'$/\1/p" "$1" 2>/dev/null | head -n1
+}
+
 manager_is_newer() {
     [ -f "$RT_BIN_DIR/$RT_NAME" ] || return 1
-    _rt_min_version=$(sed -n "s/^RT_VERSION='\([^']*\)'$/\1/p" "$RT_BIN_DIR/$RT_NAME" | head -n1)
+    _rt_min_version=$(manager_version "$RT_BIN_DIR/$RT_NAME")
     awk -v manager="$_rt_min_version" -v target="$1" '
         BEGIN {
             if (manager !~ /^v[0-9]+\.[0-9]+\.[0-9]+($|-)/) exit 1
@@ -2349,6 +2355,27 @@ manager_is_newer() {
             exit 1
         }
     '
+}
+
+service_main_pid() {
+    case "$RT_INIT" in
+        systemd) systemctl_do show "$RT_SVC_NAME" -p MainPID --value ;;
+        nohup) cat "$RT_PID_FILE" ;;
+        *) return 1 ;;
+    esac
+}
+
+# 仅比较内核报告的可执行文件，不以 root 执行正在运行的进程映像。
+running_image_differs() {
+    _rt_img_pid=$(service_main_pid 2>/dev/null) || return 1
+    _rt_img_inode=$(stat -Lc '%d:%i' "/proc/$_rt_img_pid/exe" 2>/dev/null) || return 1
+    [ "$_rt_img_inode" != "$(stat -Lc '%d:%i' "$RT_BIN_AGENT" 2>/dev/null)" ]
+}
+
+upgrade_is_current() {
+    [ "${RT_TAG#v}" = "${RT_AGENT_VERSION#v}" ] &&
+        { [ "$(manager_version "$RT_BIN_DIR/$RT_NAME")" = "$RT_TAG" ] || manager_is_newer "$RT_TAG"; } &&
+        ! running_image_differs
 }
 
 detach_run() {
@@ -2385,7 +2412,7 @@ cmd_upgrade() {
     resolve_release_tag
     RT_TAG=$RT_TAG_OUT
     _rt_u_cur=${RT_AGENT_VERSION:-unknown}
-    if [ "${RT_TAG#v}" = "${_rt_u_cur#v}" ]; then
+    if upgrade_is_current; then
         say "已是最新：$RT_TAG（当前 $_rt_u_cur）"
         return 0
     fi
@@ -2411,7 +2438,7 @@ cmd_upgrade() {
     fi
     lock_acquire
     state_require
-    if [ "${RT_TAG#v}" = "${RT_AGENT_VERSION#v}" ]; then
+    if upgrade_is_current; then
         say "已是最新：$RT_TAG（当前 $RT_AGENT_VERSION）"
         return 0
     fi
@@ -2421,6 +2448,10 @@ cmd_upgrade() {
     RT_ARCH=$RT_ARCH_OUT
     info "正在下载并校验 $RT_TAG"
     fetch_assets "$RT_TAG" "$RT_ARCH"
+    if ! manager_is_newer "$RT_TAG"; then
+        [ -n "$RT_DL_SCRIPT" ] && [ "$(manager_version "$RT_DL_SCRIPT")" = "$RT_TAG" ] \
+            || die "$EX_CHECKSUM" "未取得已校验的 $RT_TAG 管理脚本，旧服务仍在运行"
+    fi
     _rt_u_newsha=$(sha256_of "$RT_DL_AGENT" || true)
     [ -n "$_rt_u_newsha" ] || die "$EX_CHECKSUM" '无法计算新 agent 的 SHA256，升级中止'
     prepare_agent_dirs || die "$EX_FAIL" '无法准备 agent 运行目录和日志目录，升级中止'
@@ -2441,11 +2472,13 @@ cmd_upgrade() {
         probe_agent_caps "$RT_BIN_AGENT"
         RT_AGENT_VERSION=$(agent_version_of "$RT_BIN_AGENT")
         RT_AGENT_SHA256=$_rt_u_newsha
-        if ! install_service_unit || ! svc_daemon_reload; then
+        if [ "${RT_AGENT_VERSION#v}" != "${RT_TAG#v}" ]; then
+            _rt_u_failure="agent 版本 $RT_AGENT_VERSION 与目标 $RT_TAG 不符"
+        elif ! install_service_unit || ! svc_daemon_reload; then
             _rt_u_failure='无法加载新版本的服务配置'
         elif ! svc_start; then
             _rt_u_failure='新版本服务启动失败'
-        elif ! health_check "$RT_LISTEN_STATE" || ! svc_active; then
+        elif ! health_check "$RT_LISTEN_STATE" || ! svc_active || running_image_differs; then
             _rt_u_failure='新版本未通过健康检查'
         fi
     fi
@@ -2453,12 +2486,13 @@ cmd_upgrade() {
         if [ -n "$RT_DL_CLIENT" ]; then
             atomic_put "$RT_DL_CLIENT" "$RT_BIN_CLIENT" 0755 "$_rt_u_owner" || warn '客户端更新失败'
         fi
-        _rt_u_selfsrc=$RT_DL_SCRIPT
-        if [ -z "$_rt_u_selfsrc" ]; then _rt_u_selfsrc=$(self_script_source || true); fi
         if manager_is_newer "$RT_TAG"; then
             info '保留较新的管理脚本，仍可管理 dev 和 stable 渠道'
-        elif [ -n "$_rt_u_selfsrc" ]; then
-            atomic_put "$_rt_u_selfsrc" "$RT_BIN_DIR/$RT_NAME" 0755 "$_rt_u_owner" || warn '管理命令更新失败'
+        elif ! atomic_put "$RT_DL_SCRIPT" "$RT_BIN_DIR/$RT_NAME" 0755 "$_rt_u_owner"; then
+            RT_LAST_ERROR='管理脚本更新失败'
+            RT_LAST_UPGRADE_RESULT='partial'
+            state_write
+            die "$EX_FAIL" "agent 已运行 $RT_AGENT_VERSION，管理脚本更新失败。请重试升级"
         fi
         RT_UPGRADED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '')
         RT_LAST_UPGRADE_RESULT='ok'
@@ -2606,9 +2640,38 @@ config_key_allowed() {
     esac
 }
 
+valid_port() {
+    case "$1" in ''|*[!0-9]*|??????*) return 1 ;; esac
+    [ "$1" -gt 0 ] && [ "$1" -le 65535 ]
+}
+
+config_saved() {
+    _rt_saved_ws=$RT_WS_PATH_STATE
+    _rt_saved_sudo=$RT_ALLOW_SUDO_STATE
+    RT_LISTEN_STATE=$(conf_read_key listen)
+    RT_PORT_STATE=$(port_from_listen "$RT_LISTEN_STATE")
+    RT_WS_PATH_STATE=$(conf_read_key ws_path)
+    RT_WS_PATH_STATE=${RT_WS_PATH_STATE:-/ws}
+    RT_TLS_CERT_STATE=$(conf_read_key tls_cert)
+    RT_TLS_KEY_STATE=$(conf_read_key tls_key)
+    RT_TLS_ENABLED=false
+    if [ -n "$RT_TLS_CERT_STATE" ] && [ -n "$RT_TLS_KEY_STATE" ]; then RT_TLS_ENABLED=true; fi
+    case "$(conf_read_key allow_sudo)" in true|TRUE|True|1) RT_ALLOW_SUDO_STATE=1 ;; *) RT_ALLOW_SUDO_STATE=0 ;; esac
+    if [ "$_rt_saved_ws" != "$RT_WS_PATH_STATE" ] || [ "$_rt_saved_sudo" != "$RT_ALLOW_SUDO_STATE" ]; then
+        install_service_unit && svc_daemon_reload || die "$EX_SERVICE" '配置已保存，服务单元更新失败'
+    fi
+    state_write
+    if [ "$RT_RESTART" = 1 ]; then
+        cmd_restart
+    else
+        hint "配置已保存，执行 $RT_NAME restart 后生效"
+    fi
+}
+
 cmd_config() {
     _rt_cf_sub=${RT_SUB:-show}
     state_require
+    case "$_rt_cf_sub" in set|edit) lock_acquire; state_require ;; esac
     case "$_rt_cf_sub" in
         show)
             [ -f "$RT_CONF" ] || die "$EX_CONFLICT" "配置文件不存在：$RT_CONF"
@@ -2647,6 +2710,11 @@ cmd_config() {
             _rt_cf_rest=${RT_REST#* }
             if [ "$_rt_cf_rest" = "$RT_REST" ]; then _rt_cf_rest=''; fi
             [ -n "$_rt_cf_key" ] || die "$EX_USAGE" "用法：$RT_NAME config set <key> <value>"
+            if [ "$_rt_cf_key" = port ]; then
+                valid_port "$_rt_cf_rest" || die "$EX_USAGE" '端口必须是 1 到 65535 的整数'
+                _rt_cf_key=listen
+                _rt_cf_rest="${RT_LISTEN_STATE%:*}:$_rt_cf_rest"
+            fi
             _rt_cf_rc2=0
             config_key_allowed "$_rt_cf_key" || _rt_cf_rc2=$?
             case "$_rt_cf_rc2" in
@@ -2658,7 +2726,7 @@ cmd_config() {
             case "$_rt_cf_key" in
                 listen)
                 case "$_rt_cf_rest" in
-                    *:[0-9]*) : ;;
+                    *:*) valid_port "${_rt_cf_rest##*:}" || die "$EX_USAGE" '端口必须是 1 到 65535 的整数' ;;
                     *) die "$EX_USAGE" "listen 格式错误（例：:8443 或 127.0.0.1:8443）：$_rt_cf_rest" ;;
                 esac
                 ;;
@@ -2680,39 +2748,17 @@ cmd_config() {
             esac
             if [ "$(conf_read_key "$_rt_cf_key")" = "$_rt_cf_rest" ]; then
                 say "配置值未变化：$_rt_cf_key"
+                if [ "$RT_RESTART" = 1 ]; then config_saved; fi
                 return 0
             fi
             [ "$RT_SCOPE" = system ] && require_root_or_die
+            if [ "$_rt_cf_key" = listen ] && [ "$RT_RESTART" = 1 ] && [ "${_rt_cf_rest##*:}" != "$RT_PORT_STATE" ] && port_in_use "${_rt_cf_rest##*:}"; then
+                die "$EX_CONFLICT" "端口 ${_rt_cf_rest##*:} 已在使用，配置保持原值"
+            fi
             conf_set_key "$_rt_cf_key" "$_rt_cf_rest"
             ok "已写入 $_rt_cf_key = $_rt_cf_rest"
-            case "$_rt_cf_key" in
-                allow_sudo)
-                RT_ALLOW_SUDO_STATE=0
-                case "$_rt_cf_rest" in true|1) RT_ALLOW_SUDO_STATE=1 ;; esac
-                render_unit "$(conf_read_key listen)" "$(conf_read_key ws_path)" "$RT_ALLOW_SUDO_STATE"
-                svc_daemon_reload
-                ;;
-                listen)
-                warn "改端口后防火墙规则需重新放行：sudo ufw allow <新端口>/tcp（或 firewall-cmd --permanent --add-port=<新端口>/tcp）"
-                RT_PORT_STATE=$(port_from_listen "$_rt_cf_rest")
-                RT_LISTEN_STATE=$_rt_cf_rest
-                ;;
-                ws_path)
-                RT_WS_PATH_STATE=$_rt_cf_rest
-                render_unit "$(conf_read_key listen)" "$RT_WS_PATH_STATE" "${RT_ALLOW_SUDO_STATE:-0}"
-                svc_daemon_reload
-                ;;
-                tls_cert|tls_key)
-                RT_TLS_ENABLED=true
-                RT_TLS_CERT_STATE=$(conf_read_key tls_cert)
-                ;;
-            esac
-            if [ "$RT_RESTART" = 1 ]; then
-                svc_restart || die "$EX_SERVICE" "重启失败，排错：$RT_NAME logs"
-                ok "已重启生效"
-            else
-                hint "配置已写入，但 agent 只在启动时读取：加 --restart 或手动 $RT_NAME restart 生效"
-            fi
+            if [ "$_rt_cf_key" = listen ]; then hint "远程连接时请检查新端口的入站规则"; fi
+            config_saved
             log_line "action=config.set key=$_rt_cf_key result=ok"
             ;;
         edit)
@@ -2727,12 +2773,20 @@ cmd_config() {
                 die "$EX_FAIL" "编辑器不可用：$_rt_cf_ed（用 --editor nano 指定）"
             fi
             if [ "$RT_TTY" = 1 ]; then
-                "$_rt_cf_ed" "$_rt_cf_tmp" </dev/tty >/dev/tty 2>&1 || true
+                if ! "$_rt_cf_ed" "$_rt_cf_tmp" </dev/tty >/dev/tty 2>&1; then
+                    rm -f "$_rt_cf_tmp"
+                    die "$EX_FAIL" '编辑器退出失败，已放弃写入'
+                fi
             else
                 rm -f "$_rt_cf_tmp" 2>/dev/null || true
                 die "$EX_USAGE" "config edit 需要交互终端（可改用 $RT_NAME config set <key> <value>）"
             fi
             _rt_cf_ok=1
+            _rt_cf_listen=$(conf_read_key listen "$_rt_cf_tmp")
+            case "$_rt_cf_listen" in
+                *:*) valid_port "${_rt_cf_listen##*:}" || _rt_cf_ok=0 ;;
+                *) _rt_cf_ok=0 ;;
+            esac
             for _rt_cf_k2 in listen id token; do
                 if [ -z "$(sed -n "s/^[[:space:]]*${_rt_cf_k2}[[:space:]]*=[[:space:]]*//p" "$_rt_cf_tmp" 2>/dev/null | head -n1 || true)" ]; then
                     err "缺少必填键：$_rt_cf_k2"
@@ -2750,7 +2804,7 @@ cmd_config() {
             rm -f "$_rt_cf_tmp" 2>/dev/null || true
             conf_finish_perms "$RT_CONF"
             ok "配置已更新（0600 $RT_RUN_USER:$RT_RUN_GROUP）"
-            if [ "$RT_RESTART" = 1 ]; then svc_restart || warn "重启失败"; else hint "记得 $RT_NAME restart 使配置生效"; fi
+            config_saved
             ;;
         *)
             die "$EX_USAGE" "用法：$RT_NAME config show|get <key>|set <key> <value>|edit"
@@ -3264,7 +3318,12 @@ cmd_menu() {
             fi
         fi
         say ''
-        info "rtctl $RT_VERSION  |  $RT_SCOPE  |  渠道 $_rt_menu_channel"
+        if load_state; then
+            info "管理脚本 $RT_VERSION  |  agent $RT_AGENT_VERSION  |  配置监听 $RT_LISTEN_STATE"
+        else
+            info "管理脚本 $RT_VERSION"
+        fi
+        say "范围 $RT_SCOPE  |  渠道 $_rt_menu_channel"
         say '  1  状态'
         say '  2  连接信息'
         say '  3  日志'
@@ -3272,6 +3331,7 @@ cmd_menu() {
         say '  5  检查更新'
         say '  6  升级到所选渠道'
         say '  7  卸载'
+        say '  8  修改配置'
         say '  0  退出'
         printf '请选择：' >&2
         IFS= read -r _rt_menu_choice <&3 || return 0
@@ -3295,12 +3355,38 @@ cmd_menu() {
             5) set -- upgrade --check ;;
             6) set -- upgrade --wait ;;
             7) set -- uninstall ;;
+            8)
+                say '  1  查看配置'
+                say '  2  修改端口并重启'
+                say '  3  编辑配置文件'
+                say '  4  应用配置并重启'
+                say '  0  返回'
+                printf '选择操作：' >&2
+                IFS= read -r _rt_menu_action <&3 || return 0
+                case "$_rt_menu_action" in
+                    1) set -- config show ;;
+                    2)
+                        printf '新端口（1–65535，回车取消）：' >&2
+                        IFS= read -r _rt_menu_port <&3 || return 0
+                        [ -n "$_rt_menu_port" ] || continue
+                        valid_port "$_rt_menu_port" || { err '请输入 1 到 65535 的整数'; continue; }
+                        set -- config set port "$_rt_menu_port" --restart ;;
+                    3) set -- config edit ;;
+                    4) set -- restart ;;
+                    0|'') continue ;;
+                    *) err '请输入 0 到 4'; continue ;;
+                esac ;;
             0|q|exit) return 0 ;;
             '') continue ;;
-            *) err '请输入 0 到 7'; continue ;;
+            *) err '请输入 0 到 8'; continue ;;
         esac
         if menu_run "$@"; then
             if [ "$1" = uninstall ] && [ ! -f "$RT_MENU_SCRIPT" ]; then return 0; fi
+            if [ "$1" = upgrade ] && [ "$2" = --wait ] && [ "$(manager_version "$RT_MENU_SCRIPT")" != "$RT_VERSION" ]; then
+                set -- menu --scope "$RT_SCOPE"
+                if [ -n "$RT_PREFIX" ]; then set -- "$@" --prefix "$RT_PREFIX"; fi
+                exec /bin/sh "$RT_MENU_SCRIPT" "$@"
+            fi
         else
             _rt_menu_rc=$?
             err "$RT_NAME $1 退出码：$_rt_menu_rc"
@@ -3369,6 +3455,7 @@ cmd_help() {
             say '  show                          查看配置（默认）'
             say '  get <key>                     读取配置项'
             say '  set <key> <value> [--restart]   修改配置项'
+            say '  set port <1–65535> [--restart]  仅修改端口，保留监听地址'
             say '  edit [--editor CMD] [--restart] 编辑配置文件'
             return
             ;;
@@ -3398,7 +3485,7 @@ cmd_help() {
             ;;
         menu)
             say "用法  $RT_NAME menu [--scope system|user]"
-            say '  状态、连接信息、日志、渠道切换、检查更新、升级、卸载'
+            say '  状态、连接信息、日志、渠道切换、检查更新、升级、卸载、修改配置'
             return
             ;;
         channel)

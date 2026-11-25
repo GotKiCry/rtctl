@@ -90,3 +90,68 @@ state_require
 [ "$RT_INSTALLED_AT" = "$failure_time" ] && [ -z "$RT_LAST_ERROR" ]
 health_probe "$RT_LISTEN_STATE"
 echo 'PASS failed start records metadata and reinstall recovers'
+
+old_listen=$RT_LISTEN_STATE
+old_port=$RT_PORT_STATE
+RT_PORT=''
+pick_port
+new_port=$RT_PORT_PICKED
+(RT_SUB=set; RT_REST="port $new_port"; cmd_config) >"$fixture/config.out"
+state_require
+[ "$RT_LISTEN_STATE" = "127.0.0.1:$new_port" ]
+[ "$(state_get PORT)" = "$new_port" ]
+health_probe "$old_listen"
+cmd_version >"$fixture/version.out"
+grep -Fq "$RT_LISTEN_STATE" "$fixture/version.out"
+(RT_SUB=set; RT_REST="port $new_port"; RT_RESTART=1; cmd_config) >"$fixture/restart.out"
+health_probe "$RT_LISTEN_STATE"
+if health_probe "$old_listen"; then exit 1; fi
+(RT_SUB=set; RT_REST='port 65536'; cmd_config) >"$fixture/invalid.out" 2>&1 && exit 1
+[ "$(conf_read_key listen)" = "127.0.0.1:$new_port" ]
+# Direct file edits must override cached ports for status and restart too.
+conf_set_key listen "$old_listen"
+cmd_restart >"$fixture/restart.out"
+health_probe "$old_listen"
+echo 'PASS saved vs applied port, same-value restart and manual config edit'
+
+# Exercise the interactive dispatcher with the same isolated home and service.
+cp "$fixture/functions.sh" "$fixture/rt"
+cat >>"$fixture/rt" <<'TEST_MENU'
+home_dir() { RT_HOME_DIR=$RT_TEST_HOME; }
+RT_SVC_NAME=$RT_TEST_SERVICE
+main "$@"
+TEST_MENU
+export RT_TEST_HOME="$fixture" RT_TEST_SERVICE="$RT_SVC_NAME"
+printf '8\n2\n%s\n0\n' "$new_port" | script -qec "sh '$fixture/rt' menu --scope user" /dev/null >"$fixture/menu.out"
+grep -Fq "配置监听 127.0.0.1:$new_port" "$fixture/menu.out"
+health_probe "127.0.0.1:$new_port"
+printf '#!/bin/sh\nsed -i "s/:%s$/:04444/" "$1"\n' "$new_port" >"$fixture/editor"
+chmod 0700 "$fixture/editor"
+script -qec "sh '$fixture/rt' config edit --scope user --editor '$fixture/editor'" /dev/null </dev/null >"$fixture/edit.out"
+[ "$(state_get LISTEN)" = '127.0.0.1:04444' ]
+health_probe "127.0.0.1:$new_port"
+(RT_SUB=set; RT_REST="listen $old_listen"; RT_RESTART=1; cmd_config) >"$fixture/restore.out"
+echo 'PASS interactive menu port change and config editor save'
+
+if [ "$agent" != "$legacy_agent" ]; then
+    RT_RELEASE=$(agent_version_of "$agent")
+    RT_BASE_URL="file://$fixture/assets"
+    detect_arch
+    mkdir "$fixture/assets"
+    cp "$agent" "$fixture/assets/rtctl-agent-linux-$RT_ARCH_OUT"
+    sed "s/^RT_VERSION=.*/RT_VERSION='$RT_RELEASE'/" "$installer" >"$fixture/assets/install.sh"
+    (cd "$fixture/assets"; sha256sum rtctl-agent-* install.sh > SHA256SUMS.txt)
+    atomic_put "$legacy_agent" "$RT_BIN_AGENT" 0755
+    svc_restart
+    health_check "$old_listen"
+    RT_AGENT_VERSION=$RT_RELEASE
+    state_write
+    RT_DETACHED=1
+    (cmd_upgrade) >"$fixture/upgrade.out"
+    state_require
+    [ "$RT_AGENT_VERSION" = "$RT_RELEASE" ]
+    [ "$(manager_version "$RT_BIN_DIR/rt")" = "$RT_RELEASE" ]
+    if running_image_differs; then exit 1; fi
+    health_probe "$old_listen"
+    echo 'PASS upgrade repairs stale version record and verifies running binary'
+fi
